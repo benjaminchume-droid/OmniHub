@@ -59,6 +59,15 @@ interface ChatDao {
 
     @Query("DELETE FROM conversations WHERE isTemporary = 1")
     suspend fun clearTemporary()
+
+    @Query("DELETE FROM messages")
+    suspend fun deleteAllMessages()
+
+    @Query("DELETE FROM conversations")
+    suspend fun deleteAllConversations()
+
+    @Query("SELECT * FROM messages ORDER BY timestamp ASC")
+    suspend fun getAllMessages(): List<MessageEntity>
 }
 
 @Database(entities = [ConversationEntity::class, MessageEntity::class], version = 1, exportSchema = false)
