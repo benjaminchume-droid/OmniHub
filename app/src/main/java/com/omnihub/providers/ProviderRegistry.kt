@@ -15,4 +15,8 @@ class ProviderRegistry(private val context: Context) {
     fun get(id: String): AiProvider? = providers.find { it.id == id }
 
     fun hasAny(): Boolean = providers.isNotEmpty()
+
+    fun clear() {
+        providers.clear()
+    }
 }
