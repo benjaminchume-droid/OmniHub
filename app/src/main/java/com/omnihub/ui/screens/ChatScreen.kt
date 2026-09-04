@@ -163,7 +163,7 @@ fun ChatScreen(
                     onClick = onOpenSettings
                 )
                 NavigationDrawerItem(
-                    icon = { Icon(Icons.Outlined.Hub, null) },
+                    icon = { Icon(Icons.Outlined.AccountTree, null) },
                     label = { Text("Connected AI services") },
                     selected = false,
                     onClick = onOpenSettings
