@@ -8,11 +8,20 @@ import com.omnihub.providers.ProviderRegistry
 import com.omnihub.providers.impl.ProviderBootstrap
 import com.omnihub.providers.websession.WebSessionManager
 import com.omnihub.soul.SoulManager
+import com.omnihub.source.AutoIssueReporter
+import com.omnihub.source.SourceManager
+import com.omnihub.source.SourceRouter
 
 class OmniHubApp : Application() {
     lateinit var registry: ProviderRegistry
         private set
     lateinit var router: OmniRouter
+        private set
+    lateinit var sourceRouter: SourceRouter
+        private set
+    lateinit var sourceManager: SourceManager
+        private set
+    lateinit var issueReporter: AutoIssueReporter
         private set
     lateinit var soul: SoulManager
         private set
@@ -31,12 +40,16 @@ class OmniHubApp : Application() {
         chatRepo = ChatRepository(this)
         webSessions = WebSessionManager(this)
         mcp = McpClient(this)
+        sourceManager = SourceManager(this)
+        issueReporter = AutoIssueReporter(this)
         ProviderBootstrap.reload(this, registry)
         router = OmniRouter(registry)
+        sourceRouter = SourceRouter(sourceManager, soul, issueReporter)
     }
 
     fun reloadProviders() {
         ProviderBootstrap.reload(this, registry)
+        sourceManager.reload()
     }
 
     companion object {
