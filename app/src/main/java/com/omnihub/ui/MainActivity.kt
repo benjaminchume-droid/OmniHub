@@ -28,7 +28,6 @@ class MainActivity : ComponentActivity() {
                         mutableStateOf(UserPrefs.isSetupComplete(context) && UserPrefs.hasAcceptedLegal(context))
                     }
                     val navController = rememberNavController()
-
                     if (!setupDone) {
                         NavHost(navController = navController, startDestination = "onboarding") {
                             composable("onboarding") {
@@ -37,10 +36,7 @@ class MainActivity : ComponentActivity() {
                                     onOpenLegal = { doc -> navController.navigate("legal/${doc.name}") }
                                 )
                             }
-                            composable(
-                                "legal/{doc}",
-                                arguments = listOf(navArgument("doc") { type = NavType.StringType })
-                            ) { entry ->
+                            composable("legal/{doc}", arguments = listOf(navArgument("doc") { type = NavType.StringType })) { entry ->
                                 val doc = LegalDoc.valueOf(entry.arguments?.getString("doc") ?: LegalDoc.TERMS.name)
                                 LegalScreen(doc = doc, onBack = { navController.popBackStack() })
                             }
@@ -63,7 +59,8 @@ fun OmniHubNav() {
                 onOpenSettings = { navController.navigate("settings") },
                 onOpenCustomize = { navController.navigate("customize") },
                 onOpenSkills = { navController.navigate("skills") },
-                onOpenProjects = { navController.navigate("projects") }
+                onOpenProjects = { navController.navigate("projects") },
+                onOpenSources = { navController.navigate("sources") }
             )
         }
         composable("settings") {
@@ -73,22 +70,12 @@ fun OmniHubNav() {
                 onOpenLegal = { doc -> navController.navigate("legal/${doc.name}") }
             )
         }
-        composable("customize") {
-            CustomizeScreen(onBack = { navController.popBackStack() })
-        }
-        composable("connectors") {
-            ConnectorsScreen(onBack = { navController.popBackStack() })
-        }
-        composable("skills") {
-            SkillsScreen(onBack = { navController.popBackStack() })
-        }
-        composable("projects") {
-            ProjectsScreen(onBack = { navController.popBackStack() })
-        }
-        composable(
-            "legal/{doc}",
-            arguments = listOf(navArgument("doc") { type = NavType.StringType })
-        ) { entry ->
+        composable("customize") { CustomizeScreen(onBack = { navController.popBackStack() }) }
+        composable("connectors") { ConnectorsScreen(onBack = { navController.popBackStack() }) }
+        composable("skills") { SkillsScreen(onBack = { navController.popBackStack() }) }
+        composable("projects") { ProjectsScreen(onBack = { navController.popBackStack() }) }
+        composable("sources") { SourcesScreen(onBack = { navController.popBackStack() }) }
+        composable("legal/{doc}", arguments = listOf(navArgument("doc") { type = NavType.StringType })) { entry ->
             val doc = LegalDoc.valueOf(entry.arguments?.getString("doc") ?: LegalDoc.PRIVACY.name)
             LegalScreen(doc = doc, onBack = { navController.popBackStack() })
         }
