@@ -1,5 +1,8 @@
 package com.omnihub.ui.screens
 
+import android.content.Intent
+import android.provider.Settings
+import android.widget.Toast
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -8,7 +11,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
-import androidx.compose.material.icons.outlined.Extension
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
@@ -19,58 +21,96 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import com.omnihub.OmniHubApp
 import com.omnihub.data.SecureStore
+import kotlinx.coroutines.launch
+import java.io.File
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
     onBack: () -> Unit,
-    onOpenConnectors: () -> Unit = {},
-    onOpenLegal: (LegalDoc) -> Unit = {}
+    onOpenConnectors: () -> Unit,
+    onOpenLegal: (LegalDoc) -> Unit
 ) {
+    val context = LocalContext.current
+    val app = context.applicationContext as OmniHubApp
+    val scope = rememberCoroutineScope()
+    var status by remember { mutableStateOf<String?>(null) }
+    var confirmDelete by remember { mutableStateOf(false) }
+
     Scaffold(
         topBar = {
             TopAppBar(
                 title = { Text("Settings", fontWeight = FontWeight.SemiBold) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back")
                     }
                 }
             )
         }
     ) { padding ->
         Column(
-            Modifier.padding(padding).fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+            Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .verticalScroll(rememberScrollState())
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            Text("AI Providers", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Text("API Keys", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Text(
+                "Keys are stored with Android Keystore encryption. Web Sessions (Chat → +) is the recommended path.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
             ProviderKeyField("OpenAI", "openai")
             ProviderKeyField("Anthropic", "anthropic")
-            ProviderKeyField("Google Gemini", "gemini")
+            ProviderKeyField("Gemini", "gemini")
+            ProviderKeyField("Groq", "groq")
             ProviderKeyField("DeepSeek", "deepseek")
             ProviderKeyField("OpenRouter", "openrouter")
+            ProviderKeyField("Kimi", "kimi")
+            ProviderKeyField("Mistral", "mistral")
             ProviderKeyField("Perplexity", "perplexity")
-            ProviderKeyField("Kimi (Moonshot)", "kimi")
-            ProviderKeyField("Z.AI (Zhipu)", "zai")
-            ProviderKeyField("NVIDIA NIM", "nvidia")
-            ProviderKeyField("Groq", "groq")
-
-            HorizontalDivider(Modifier.padding(vertical = 8.dp))
-            Text("Web login", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-            Text(
-                "Use + on the chat screen to open a provider dashboard and copy an official API key. Cookie-only chat against ChatGPT/Claude web is not supported.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.outline
-            )
+            ProviderKeyField("NVIDIA", "nvidia")
+            ProviderKeyField("Z.AI", "zai")
 
             HorizontalDivider(Modifier.padding(vertical = 8.dp))
             Text("Connectors", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
             ListItem(
-                headlineContent = { Text("MCP Servers & tools") },
-                supportingContent = { Text("GitHub, Supabase, Vercel, Gmail, Maps, custom URL") },
-                leadingContent = { Icon(Icons.Outlined.Extension, null) },
+                headlineContent = { Text("MCP / Connectors") },
+                supportingContent = { Text("GitHub, Supabase, Vercel, Gmail, Maps, custom URLs") },
+                leadingContent = { Icon(Icons.Default.Extension, null) },
                 trailingContent = { Icon(Icons.Default.ChevronRight, null) },
-                modifier = Modifier.clickable(onClick = onOpenConnectors)
+                modifier = Modifier.clickable { onOpenConnectors() }
+            )
+
+            HorizontalDivider(Modifier.padding(vertical = 8.dp))
+            Text("Data & Privacy", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            ListItem(
+                headlineContent = { Text("Export my data") },
+                supportingContent = { Text("Save conversations as JSON on device") },
+                leadingContent = { Icon(Icons.Default.Download, null) },
+                modifier = Modifier.clickable {
+                    scope.launch {
+                        try {
+                            val json = app.chatRepo.exportAsJson()
+                            val dir = context.getExternalFilesDir(null) ?: context.filesDir
+                            val file = File(dir, "omnihub_export_${System.currentTimeMillis()}.json")
+                            file.writeText(json)
+                            status = "Exported to ${file.absolutePath}"
+                            Toast.makeText(context, "Exported", Toast.LENGTH_SHORT).show()
+                        } catch (e: Exception) {
+                            status = e.message
+                        }
+                    }
+                }
+            )
+            ListItem(
+                headlineContent = { Text("Delete all data") },
+                supportingContent = { Text("Wipe chats, keys, and sessions from this device") },
+                leadingContent = { Icon(Icons.Default.DeleteForever, null, tint = MaterialTheme.colorScheme.error) },
+                modifier = Modifier.clickable { confirmDelete = true }
             )
 
             HorizontalDivider(Modifier.padding(vertical = 8.dp))
@@ -96,9 +136,72 @@ fun SettingsScreen(
 
             HorizontalDivider(Modifier.padding(vertical = 8.dp))
             Text("App", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-            ListItem(headlineContent = { Text("Version") }, supportingContent = { Text("1.0.0") }, leadingContent = { Icon(Icons.Default.Info, null) })
-            ListItem(headlineContent = { Text("Set as Digital Assistant") }, supportingContent = { Text("Make OmniHub the default assistant in system settings") }, leadingContent = { Icon(Icons.Default.RecordVoiceOver, null) })
+            ListItem(
+                headlineContent = { Text("Version") },
+                supportingContent = { Text("1.0.0") },
+                leadingContent = { Icon(Icons.Default.Info, null) }
+            )
+            ListItem(
+                headlineContent = { Text("Set as Digital Assistant") },
+                supportingContent = { Text("Opens system settings so you can set OmniHub as default") },
+                leadingContent = { Icon(Icons.Default.RecordVoiceOver, null) },
+                modifier = Modifier.clickable {
+                    try {
+                        val intents = listOf(
+                            Intent(Settings.ACTION_VOICE_INPUT_SETTINGS),
+                            Intent(Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS),
+                            Intent(Settings.ACTION_SETTINGS)
+                        )
+                        var launched = false
+                        for (intent in intents) {
+                            try {
+                                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                context.startActivity(intent)
+                                launched = true
+                                break
+                            } catch (_: Exception) {}
+                        }
+                        if (!launched) {
+                            Toast.makeText(context, "Open Settings → Apps → Default apps → Digital assistant", Toast.LENGTH_LONG).show()
+                        }
+                    } catch (e: Exception) {
+                        Toast.makeText(context, e.message ?: "Could not open settings", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            )
+
+            status?.let {
+                Text(it, color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodySmall)
+            }
+            Spacer(Modifier.height(24.dp))
         }
+    }
+
+    if (confirmDelete) {
+        AlertDialog(
+            onDismissRequest = { confirmDelete = false },
+            title = { Text("Delete all data?") },
+            text = { Text("This permanently removes all conversations, API keys, and web sessions from this device. Cannot be undone.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmDelete = false
+                    scope.launch {
+                        try {
+                            app.chatRepo.deleteAll()
+                            SecureStore.clearAllSecrets(context)
+                            app.reloadProviders()
+                            status = "All local data deleted"
+                            Toast.makeText(context, "Deleted", Toast.LENGTH_SHORT).show()
+                        } catch (e: Exception) {
+                            status = e.message
+                        }
+                    }
+                }) { Text("Delete everything") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmDelete = false }) { Text("Cancel") }
+            }
+        )
     }
 }
 
