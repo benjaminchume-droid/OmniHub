@@ -20,7 +20,6 @@ android {
         create("release") {
             val keystorePropsFile = rootProject.file("keystore.properties")
             if (keystorePropsFile.exists()) {
-                // Parse key=value lines without java.util.Properties (Kotlin DSL friendly)
                 val props = keystorePropsFile.readLines()
                     .map { it.trim() }
                     .filter { it.isNotEmpty() && !it.startsWith("#") && it.contains("=") }
@@ -28,7 +27,8 @@ android {
                         val idx = it.indexOf("=")
                         it.substring(0, idx).trim() to it.substring(idx + 1).trim()
                     }
-                storeFile = file(props.getValue("storeFile"))
+                // Must use rootProject.file — plain file() resolves under app/
+                storeFile = rootProject.file(props.getValue("storeFile"))
                 storePassword = props.getValue("storePassword")
                 keyAlias = props.getValue("keyAlias")
                 keyPassword = props.getValue("keyPassword")
@@ -40,7 +40,11 @@ android {
         release {
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            signingConfig = signingConfigs.getByName("release")
+            // Only attach signing if keystore actually exists
+            val releaseSigning = signingConfigs.findByName("release")
+            if (releaseSigning != null && releaseSigning.storeFile != null && releaseSigning.storeFile!!.exists()) {
+                signingConfig = releaseSigning
+            }
         }
     }
 
