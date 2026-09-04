@@ -20,13 +20,18 @@ android {
         create("release") {
             val keystorePropsFile = rootProject.file("keystore.properties")
             if (keystorePropsFile.exists()) {
-                val props = java.util.Properties().apply {
-                    load(keystorePropsFile.inputStream())
-                }
-                storeFile = file(props["storeFile"] as String)
-                storePassword = props["storePassword"] as String
-                keyAlias = props["keyAlias"] as String
-                keyPassword = props["keyPassword"] as String
+                // Parse key=value lines without java.util.Properties (Kotlin DSL friendly)
+                val props = keystorePropsFile.readLines()
+                    .map { it.trim() }
+                    .filter { it.isNotEmpty() && !it.startsWith("#") && it.contains("=") }
+                    .associate {
+                        val idx = it.indexOf("=")
+                        it.substring(0, idx).trim() to it.substring(idx + 1).trim()
+                    }
+                storeFile = file(props.getValue("storeFile"))
+                storePassword = props.getValue("storePassword")
+                keyAlias = props.getValue("keyAlias")
+                keyPassword = props.getValue("keyPassword")
             }
         }
     }
