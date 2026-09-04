@@ -1,5 +1,6 @@
 package com.omnihub.ui.screens
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -7,6 +8,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.outlined.Extension
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
@@ -17,7 +19,10 @@ import androidx.compose.ui.unit.dp
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen(onBack: () -> Unit) {
+fun SettingsScreen(
+    onBack: () -> Unit,
+    onOpenConnectors: () -> Unit = {}
+) {
     Scaffold(
         topBar = {
             TopAppBar(
@@ -51,7 +56,7 @@ fun SettingsScreen(onBack: () -> Unit) {
             ProviderKeyField("NVIDIA NIM")
             ProviderKeyField("Groq")
 
-            Divider(Modifier.padding(vertical = 8.dp))
+            HorizontalDivider(Modifier.padding(vertical = 8.dp))
 
             Text("Web Sessions", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
             Text(
@@ -64,7 +69,18 @@ fun SettingsScreen(onBack: () -> Unit) {
             ProviderKeyField("Gemini Web Cookie")
             ProviderKeyField("Grok Web Cookie")
 
-            Divider(Modifier.padding(vertical = 8.dp))
+            HorizontalDivider(Modifier.padding(vertical = 8.dp))
+
+            Text("Connectors", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            ListItem(
+                headlineContent = { Text("MCP Servers & tools") },
+                supportingContent = { Text("GitHub, Supabase, Vercel, Gmail, Maps, custom URL") },
+                leadingContent = { Icon(Icons.Outlined.Extension, null) },
+                trailingContent = { Icon(Icons.Default.ChevronRight, null) },
+                modifier = Modifier.clickable(onClick = onOpenConnectors)
+            )
+
+            HorizontalDivider(Modifier.padding(vertical = 8.dp))
 
             Text("App", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
             ListItem(
