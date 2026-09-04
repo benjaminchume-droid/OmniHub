@@ -4,16 +4,15 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
-import androidx.compose.runtime.Composable
+import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
-import com.omnihub.ui.screens.ChatScreen
-import com.omnihub.ui.screens.CustomizeScreen
-import com.omnihub.ui.screens.SettingsScreen
+import com.omnihub.data.UserPrefs
+import com.omnihub.ui.screens.*
 import com.omnihub.ui.theme.OmniHubTheme
 
 class MainActivity : ComponentActivity() {
@@ -21,8 +20,14 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         setContent {
             OmniHubTheme {
-                Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-                    OmniHubNav()
+                Surface(modifier = Modifier.fillMaxSize()) {
+                    val context = LocalContext.current
+                    var setupDone by remember { mutableStateOf(UserPrefs.isSetupComplete(context)) }
+                    if (!setupDone) {
+                        OnboardingScreen(onComplete = { setupDone = true })
+                    } else {
+                        OmniHubNav()
+                    }
                 }
             }
         }
@@ -40,10 +45,16 @@ fun OmniHubNav() {
             )
         }
         composable("settings") {
-            SettingsScreen(onBack = { navController.popBackStack() })
+            SettingsScreen(
+                onBack = { navController.popBackStack() },
+                onOpenConnectors = { navController.navigate("connectors") }
+            )
         }
         composable("customize") {
             CustomizeScreen(onBack = { navController.popBackStack() })
+        }
+        composable("connectors") {
+            ConnectorsScreen(onBack = { navController.popBackStack() })
         }
     }
 }
