@@ -21,7 +21,8 @@ import androidx.compose.ui.unit.dp
 @Composable
 fun SettingsScreen(
     onBack: () -> Unit,
-    onOpenConnectors: () -> Unit = {}
+    onOpenConnectors: () -> Unit = {},
+    onOpenLegal: (LegalDoc) -> Unit = {}
 ) {
     Scaffold(
         topBar = {
@@ -36,15 +37,10 @@ fun SettingsScreen(
         }
     ) { padding ->
         Column(
-            Modifier
-                .padding(padding)
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(16.dp),
+            Modifier.padding(padding).fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
             Text("AI Providers", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-
             ProviderKeyField("OpenAI")
             ProviderKeyField("Anthropic (Claude)")
             ProviderKeyField("Google Gemini")
@@ -57,20 +53,14 @@ fun SettingsScreen(
             ProviderKeyField("Groq")
 
             HorizontalDivider(Modifier.padding(vertical = 8.dp))
-
             Text("Web Sessions", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-            Text(
-                "Paste the full Cookie header or session token from your browser after logging into the site.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.outline
-            )
+            Text("Paste the full Cookie header after logging into the site.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
             ProviderKeyField("ChatGPT Web Cookie")
             ProviderKeyField("Claude Web Cookie")
             ProviderKeyField("Gemini Web Cookie")
             ProviderKeyField("Grok Web Cookie")
 
             HorizontalDivider(Modifier.padding(vertical = 8.dp))
-
             Text("Connectors", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
             ListItem(
                 headlineContent = { Text("MCP Servers & tools") },
@@ -81,18 +71,30 @@ fun SettingsScreen(
             )
 
             HorizontalDivider(Modifier.padding(vertical = 8.dp))
+            Text("Legal", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            ListItem(
+                headlineContent = { Text("Privacy Policy") },
+                leadingContent = { Icon(Icons.Default.PrivacyTip, null) },
+                trailingContent = { Icon(Icons.Default.ChevronRight, null) },
+                modifier = Modifier.clickable { onOpenLegal(LegalDoc.PRIVACY) }
+            )
+            ListItem(
+                headlineContent = { Text("Terms of Service") },
+                leadingContent = { Icon(Icons.Default.Description, null) },
+                trailingContent = { Icon(Icons.Default.ChevronRight, null) },
+                modifier = Modifier.clickable { onOpenLegal(LegalDoc.TERMS) }
+            )
+            ListItem(
+                headlineContent = { Text("Community Guidelines") },
+                leadingContent = { Icon(Icons.Default.Groups, null) },
+                trailingContent = { Icon(Icons.Default.ChevronRight, null) },
+                modifier = Modifier.clickable { onOpenLegal(LegalDoc.COMMUNITY) }
+            )
 
+            HorizontalDivider(Modifier.padding(vertical = 8.dp))
             Text("App", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-            ListItem(
-                headlineContent = { Text("Version") },
-                supportingContent = { Text("1.0.0") },
-                leadingContent = { Icon(Icons.Default.Info, null) }
-            )
-            ListItem(
-                headlineContent = { Text("Set as Digital Assistant") },
-                supportingContent = { Text("Open system settings to make OmniHub the default assistant") },
-                leadingContent = { Icon(Icons.Default.RecordVoiceOver, null) }
-            )
+            ListItem(headlineContent = { Text("Version") }, supportingContent = { Text("1.0.0") }, leadingContent = { Icon(Icons.Default.Info, null) })
+            ListItem(headlineContent = { Text("Set as Digital Assistant") }, supportingContent = { Text("Make OmniHub the default assistant in system settings") }, leadingContent = { Icon(Icons.Default.RecordVoiceOver, null) })
         }
     }
 }
@@ -101,7 +103,6 @@ fun SettingsScreen(
 private fun ProviderKeyField(label: String) {
     var value by remember { mutableStateOf("") }
     var visible by remember { mutableStateOf(false) }
-
     OutlinedTextField(
         value = value,
         onValueChange = { value = it },
@@ -112,10 +113,7 @@ private fun ProviderKeyField(label: String) {
         visualTransformation = if (visible) VisualTransformation.None else PasswordVisualTransformation(),
         trailingIcon = {
             IconButton(onClick = { visible = !visible }) {
-                Icon(
-                    if (visible) Icons.Default.VisibilityOff else Icons.Default.Visibility,
-                    contentDescription = null
-                )
+                Icon(if (visible) Icons.Default.VisibilityOff else Icons.Default.Visibility, null)
             }
         }
     )
