@@ -25,8 +25,9 @@ abstract class BaseApiProvider(
         .build()
 
     override suspend fun chat(request: ChatRequest): ChatResponse = withContext(Dispatchers.IO) {
+        val modelId = request.model.ifBlank { models.firstOrNull()?.id ?: "gpt-4o-mini" }
         val body = JSONObject().apply {
-            put("model", request.model)
+            put("model", modelId)
             put("messages", JSONArray().apply {
                 request.messages.forEach { msg ->
                     put(JSONObject().put("role", msg.role).put("content", msg.content))
@@ -49,7 +50,7 @@ abstract class BaseApiProvider(
             val json = JSONObject(text)
             val content = json.getJSONArray("choices").getJSONObject(0).getJSONObject("message").getString("content")
             val usage = json.optJSONObject("usage")?.optInt("total_tokens") ?: 0
-            ChatResponse(content = content, model = request.model, providerId = id, usageTokens = usage)
+            ChatResponse(content = content, model = modelId, providerId = id, usageTokens = usage)
         }
     }
 }
