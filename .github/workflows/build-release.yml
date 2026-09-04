@@ -33,27 +33,32 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Decode keystore (if secret present)
-        if: ${{ secrets.KEYSTORE_BASE64 != '' }}
+      - name: Decode keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
-          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > omnihub-release.jks
-          cat > keystore.properties << PROPS
-          storeFile=omnihub-release.jks
-          storePassword=${{ secrets.KEYSTORE_PASSWORD }}
-          keyAlias=${{ secrets.KEY_ALIAS }}
-          keyPassword=${{ secrets.KEY_PASSWORD }}
-          PROPS
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > omnihub-release.jks
+            echo "storeFile=omnihub-release.jks" > keystore.properties
+            echo "storePassword=$KEYSTORE_PASSWORD" >> keystore.properties
+            echo "keyAlias=$KEY_ALIAS" >> keystore.properties
+            echo "keyPassword=$KEY_PASSWORD" >> keystore.properties
+            echo "Keystore decoded successfully"
+          else
+            echo "No KEYSTORE_BASE64 secret — will build debug APK"
+          fi
 
       - name: Build APK
         run: |
           if [ -f keystore.properties ]; then
             echo "Building signed release APK..."
-            gradle assembleRelease --stacktrace || true
-            ./gradlew assembleRelease --stacktrace || true
+            gradle assembleRelease --stacktrace || ./gradlew assembleRelease --stacktrace
           else
-            echo "No signing secrets — building debug APK..."
-            gradle assembleDebug --stacktrace || true
-            ./gradlew assembleDebug --stacktrace || true
+            echo "Building debug APK..."
+            gradle assembleDebug --stacktrace || ./gradlew assembleDebug --stacktrace
           fi
 
       - name: Find APK
@@ -61,7 +66,7 @@ jobs:
         run: |
           APK=$(find app/build/outputs -name "*.apk" 2>/dev/null | head -1 || true)
           if [ -z "$APK" ]; then
-            echo "No APK produced yet — project structure still incomplete"
+            echo "No APK produced — project still incomplete"
             exit 1
           fi
           echo "path=$APK" >> $GITHUB_OUTPUT
