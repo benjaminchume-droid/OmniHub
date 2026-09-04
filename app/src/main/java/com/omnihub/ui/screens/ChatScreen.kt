@@ -2,6 +2,7 @@ package com.omnihub.ui.screens
 
 import android.content.Intent
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -24,6 +25,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -32,6 +34,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import com.omnihub.OmniHubApp
+import com.omnihub.R
 import com.omnihub.data.UserPrefs
 import com.omnihub.history.ConversationEntity
 import com.omnihub.providers.ChatRequest
@@ -59,9 +62,21 @@ fun ChatScreen(
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val keyboard = LocalSoftwareKeyboardController.current
 
-    var currentConvId by remember { mutableStateOf<String?>(null) }
-    var activeProjectId by remember { mutableStateOf<String?>(null) }
+    val convPrefs = remember { context.getSharedPreferences("omni_chat_session", 0) }
+    var currentConvId by remember { mutableStateOf(convPrefs.getString("active_conv_id", null)) }
+    var activeProjectId by remember { mutableStateOf(convPrefs.getString("active_project_id", null)) }
     var isTemporary by remember { mutableStateOf(false) }
+
+    fun setActiveConv(id: String?, projectId: String? = activeProjectId, temporary: Boolean = false) {
+        currentConvId = id
+        activeProjectId = projectId
+        isTemporary = temporary
+        convPrefs.edit()
+            .putString("active_conv_id", id)
+            .putString("active_project_id", projectId)
+            .apply()
+    }
+
     var messageText by remember { mutableStateOf("") }
     var isSending by remember { mutableStateOf(false) }
     var showAddSheet by remember { mutableStateOf(false) }
@@ -95,8 +110,7 @@ fun ChatScreen(
                 projectId = activeProjectId,
                 reuseEmptyId = if (!temporary) currentConvId else null
             )
-            currentConvId = id
-            isTemporary = temporary
+            setActiveConv(id, activeProjectId, temporary)
             messages.clear()
             drawerState.close()
         }
@@ -135,9 +149,7 @@ fun ChatScreen(
                             Row(
                                 Modifier.fillMaxWidth().combinedClickable(
                                     onClick = {
-                                        currentConvId = conv.id
-                                        activeProjectId = conv.projectId
-                                        isTemporary = false
+                                        setActiveConv(conv.id, conv.projectId, false)
                                         scope.launch { drawerState.close() }
                                     },
                                     onLongClick = { menuConv = conv }
@@ -228,12 +240,17 @@ fun ChatScreen(
                                     isSending = true
                                     scope.launch {
                                         try {
+                                            // Stick to ONE conversation for the whole session
                                             var convId = currentConvId
-                                            if (convId == null) {
-                                                convId = app.chatRepo.createConversation(prompt.take(60), isTemporary, activeProjectId)
-                                                currentConvId = convId
+                                            if (convId.isNullOrBlank()) {
+                                                convId = app.chatRepo.createConversation(
+                                                    title = prompt.take(60),
+                                                    temporary = isTemporary,
+                                                    projectId = activeProjectId
+                                                )
+                                                setActiveConv(convId, activeProjectId, isTemporary)
                                             }
-                                            app.chatRepo.addMessage(convId, "user", prompt)
+                                            app.chatRepo.addMessage(convId!!, "user", prompt)
                                             messages.add(ChatBubble("user", prompt))
                                             messages.add(ChatBubble("assistant", "Thinking\u2026"))
                                             val idx = messages.lastIndex
@@ -241,10 +258,10 @@ fun ChatScreen(
                                                 messages[idx] = ChatBubble("assistant",
                                                     "No API key registered.\n\nTap + \u2192 paste sk- / gsk_ / AIza / sk-ant key.\nWeb Sessions store cookies; chat replies need a real API key.")
                                             } else {
-                                                val hist = app.chatRepo.getContextMessages(convId, 20)
+                                                val hist = app.chatRepo.getContextMessages(convId!!, 20)
                                                 val resp = app.router.chatWithFallback(ChatRequest("", hist))
                                                 messages[idx] = ChatBubble("assistant", resp.content)
-                                                app.chatRepo.addMessage(convId, "assistant", resp.content, resp.model, resp.providerId)
+                                                app.chatRepo.addMessage(convId!!, "assistant", resp.content, resp.model, resp.providerId)
                                             }
                                         } catch (e: Exception) {
                                             if (messages.isNotEmpty() && messages.last().content.startsWith("Thinking")) {
@@ -266,15 +283,33 @@ fun ChatScreen(
             Box(Modifier.fillMaxSize().padding(padding)) {
                 if (messages.isEmpty()) {
                     Column(Modifier.fillMaxSize().padding(32.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-                        Box(Modifier.size(96.dp).clip(CircleShape).background(Brush.radialGradient(listOf(OmniAmber.copy(0.35f), Color.Transparent)))
-                            .border(1.5.dp, OmniGlassBorder, CircleShape), contentAlignment = Alignment.Center) {
-                            Text("\uD83E\uDD16", fontSize = 42.sp)
+                        Box(
+                            Modifier
+                                .size(104.dp)
+                                .clip(CircleShape)
+                                .background(
+                                    Brush.radialGradient(
+                                        listOf(OmniAmber.copy(alpha = 0.45f), OmniAmber.copy(alpha = 0.08f), Color.Transparent)
+                                    )
+                                )
+                                .border(1.5.dp, OmniGlassBorder, CircleShape),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Image(
+                                painter = painterResource(id = R.drawable.ic_launcher_foreground),
+                                contentDescription = "OmniHub",
+                                modifier = Modifier.size(72.dp)
+                            )
                         }
-                        Spacer(Modifier.height(16.dp))
+                        Spacer(Modifier.height(20.dp))
                         Text("How can I help you?", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Medium)
                         Spacer(Modifier.height(8.dp))
-                        Text("Tap + \u2192 paste an API key to chat.\nAmber hub \u00b7 glass bubbles \u00b7 one active chat.",
-                            style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
+                        Text(
+                            "Tap + \u2192 paste an API key to chat.\nOne conversation until you start a new one.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            textAlign = TextAlign.Center
+                        )
                     }
                 } else {
                     LazyColumn(state = listState, modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -302,7 +337,7 @@ fun ChatScreen(
                 modifier = Modifier.padding(16.dp).border(1.dp, OmniGlassBorder, RoundedCornerShape(14.dp))) {
                 Column(Modifier.width(200.dp).padding(vertical = 8.dp)) {
                     listOf(
-                        Triple("Rename", Icons.Default.Edit as androidx.compose.ui.graphics.vector.ImageVector, {
+                        Triple("Rename", Icons.Default.Edit, {
                             renameText = conv.title; renameTarget = conv; menuConv = null
                         }),
                         Triple(if (conv.isPinned) "Unpin" else "Pin", Icons.Default.PushPin, {
@@ -314,7 +349,7 @@ fun ChatScreen(
                         Triple("Delete", Icons.Default.Delete, {
                             scope.launch {
                                 app.chatRepo.deleteConversation(conv.id)
-                                if (currentConvId == conv.id) { currentConvId = null; messages.clear() }
+                                if (currentConvId == conv.id) { setActiveConv(null); messages.clear() }
                             }; menuConv = null
                         })
                     ).forEach { (label, icon, action) ->
