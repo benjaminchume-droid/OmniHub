@@ -1,5 +1,6 @@
 package com.omnihub.ui.screens
 
+import android.content.Intent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -17,10 +18,18 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.omnihub.OmniHubApp
+import com.omnihub.data.UserPrefs
+import com.omnihub.providers.ChatMessage
+import com.omnihub.providers.ChatRequest
+import com.omnihub.providers.impl.ProviderBootstrap
+import com.omnihub.ui.WebLoginActivity
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -29,212 +38,199 @@ fun ChatScreen(
     onOpenSettings: () -> Unit,
     onOpenCustomize: () -> Unit
 ) {
+    val context = LocalContext.current
+    val app = context.applicationContext as OmniHubApp
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
     var messageText by remember { mutableStateOf("") }
     var isTemporary by remember { mutableStateOf(false) }
-
-    val historyItems = remember {
+    var showAddSheet by remember { mutableStateOf(false) }
+    var showWebSessionSheet by remember { mutableStateOf(false) }
+    val history = remember {
         listOf(
-            "How to build an MCP client",
-            "Explain soul.md compression",
-            "Best free AI providers 2026",
-            "Android VoiceInteractionService",
-            "Compare Claude vs Grok routing"
+            "Building Payworth website frontend",
+            "Portfolio website UI design specs",
+            "Building relay messaging app"
         )
     }
-    val messages = remember {
-        mutableStateListOf(
-            ChatBubble("user", "Hey OmniHub, what can you do?"),
-            ChatBubble("assistant", "I’m your universal AI hub. I route across dozens of providers (API keys + web sessions), keep a living soul.md memory, support MCP servers you paste in, and can become your phone’s default assistant.\n\nSwipe left for history, hit Customize for Skills / Behavior / Tone / MCP.")
-        )
-    }
+    val messages = remember { mutableStateListOf<ChatBubble>() }
 
     ModalNavigationDrawer(
         drawerState = drawerState,
         drawerContent = {
-            HistoryDrawer(
-                history = historyItems,
+            OmniDrawer(
+                history = history,
                 onNewChat = {
                     messages.clear()
                     isTemporary = false
                     scope.launch { drawerState.close() }
                 },
-                onSelectHistory = { scope.launch { drawerState.close() } },
-                onOpenAccount = { },
-                onAddService = { }
+                onSelect = { scope.launch { drawerState.close() } },
+                onOpenSettings = {
+                    scope.launch { drawerState.close() }
+                    onOpenSettings()
+                },
+                onOpenMcp = {
+                    scope.launch { drawerState.close() }
+                    onOpenCustomize()
+                }
             )
         }
     ) {
         Scaffold(
+            containerColor = MaterialTheme.colorScheme.background,
             topBar = {
                 TopAppBar(
                     title = {
                         Text(
-                            if (isTemporary) "Temporary Chat" else "OmniHub",
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            fontWeight = FontWeight.SemiBold
+                            text = if (isTemporary) "Temporary" else "OmniHub",
+                            fontWeight = FontWeight.Medium,
+                            fontSize = 17.sp
                         )
                     },
                     navigationIcon = {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            IconButton(onClick = { scope.launch { drawerState.open() } }) {
-                                Icon(Icons.Default.Menu, contentDescription = "History")
-                            }
-                            IconButton(onClick = { isTemporary = !isTemporary }) {
-                                Icon(
-                                    if (isTemporary) Icons.Filled.Timer else Icons.Outlined.Timer,
-                                    contentDescription = "Temporary chat",
-                                    tint = if (isTemporary) MaterialTheme.colorScheme.primary else LocalContentColor.current
-                                )
-                            }
-                            IconButton(onClick = {
-                                messages.clear()
-                                isTemporary = false
-                            }) {
-                                Icon(Icons.Default.AddComment, contentDescription = "New chat")
-                            }
+                        IconButton(onClick = { scope.launch { drawerState.open() } }) {
+                            Icon(Icons.Default.Menu, "Menu")
                         }
                     },
                     actions = {
-                        TextButton(onClick = onOpenCustomize) {
-                            Text("Customize", fontSize = 14.sp)
+                        IconButton(onClick = { isTemporary = !isTemporary }) {
+                            Icon(
+                                if (isTemporary) Icons.Filled.Timer else Icons.Outlined.Timer,
+                                "Temporary",
+                                tint = if (isTemporary) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
                         }
-                        IconButton(onClick = onOpenSettings) {
-                            Icon(Icons.Default.Settings, contentDescription = "Settings")
+                        IconButton(onClick = { messages.clear(); isTemporary = false }) {
+                            Icon(Icons.Outlined.Edit, "New chat")
                         }
-                    },
-                    colors = TopAppBarDefaults.topAppBarColors(
-                        containerColor = MaterialTheme.colorScheme.surface
-                    )
+                    }
                 )
             },
             bottomBar = {
-                MessageInputBar(
+                InputBar(
                     value = messageText,
                     onValueChange = { messageText = it },
+                    onPlusClick = { showAddSheet = true },
                     onSend = {
                         if (messageText.isNotBlank()) {
-                            messages.add(ChatBubble("user", messageText))
-                            messages.add(ChatBubble("assistant", "Routing through OmniRouter… (bootstrap UI — connect providers in Settings)"))
+                            val prompt = messageText
                             messageText = ""
+                            messages.add(ChatBubble("user", prompt))
+                            val pendingIndex = messages.size
+                            messages.add(ChatBubble("assistant", "Thinking…"))
+                            scope.launch {
+                                try {
+                                    if (!app.registry.hasAny()) {
+                                        messages[pendingIndex] = ChatBubble(
+                                            "assistant",
+                                            "No API key yet. Tap + and paste a provider key (OpenAI, Groq, Gemini, OpenRouter…). Web login opens the provider site so you can copy an official key — chat does not hijack ChatGPT/Claude cookies."
+                                        )
+                                    } else {
+                                        val hist = messages
+                                            .filter { !(it.role == "assistant" && it.content.startsWith("Thinking")) }
+                                            .map { ChatMessage(it.role, it.content) }
+                                            .takeLast(16)
+                                        val resp = app.router.chatWithFallback(
+                                            ChatRequest(model = "", messages = hist)
+                                        )
+                                        messages[pendingIndex] = ChatBubble("assistant", resp.content)
+                                    }
+                                } catch (e: Exception) {
+                                    messages[pendingIndex] = ChatBubble(
+                                        "assistant",
+                                        e.message ?: "All providers failed. Add another API key in Settings."
+                                    )
+                                }
+                            }
                         }
                     }
                 )
             }
         ) { padding ->
-            LazyColumn(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(padding)
-                    .padding(horizontal = 16.dp),
-                state = rememberLazyListState(),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-                contentPadding = PaddingValues(vertical = 16.dp)
-            ) {
-                items(messages) { bubble ->
-                    MessageBubble(bubble)
+            Box(Modifier.fillMaxSize().padding(padding)) {
+                if (messages.isEmpty()) {
+                    Column(
+                        Modifier.fillMaxSize().padding(horizontal = 32.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Text("✦", fontSize = 42.sp, color = MaterialTheme.colorScheme.primary)
+                        Spacer(Modifier.height(20.dp))
+                        Text("How can I help you this evening?", style = MaterialTheme.typography.headlineSmall, textAlign = TextAlign.Center)
+                    }
+                } else {
+                    LazyColumn(
+                        state = rememberLazyListState(),
+                        modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
+                        verticalArrangement = Arrangement.spacedBy(16.dp),
+                        contentPadding = PaddingValues(vertical = 16.dp)
+                    ) {
+                        items(messages) { MessageBubble(it) }
+                    }
                 }
+            }
+        }
+    }
+
+    if (showAddSheet) {
+        AddProviderSheet(
+            onDismiss = { showAddSheet = false },
+            onOpenWebSession = { showAddSheet = false; showWebSessionSheet = true },
+            onSaved = { showAddSheet = false }
+        )
+    }
+    if (showWebSessionSheet) {
+        WebSessionSearchSheet(onDismiss = { showWebSessionSheet = false })
+    }
+}
+
+@Composable
+private fun OmniDrawer(
+    history: List<String>,
+    onNewChat: () -> Unit,
+    onSelect: (String) -> Unit,
+    onOpenSettings: () -> Unit,
+    onOpenMcp: () -> Unit
+) {
+    ModalDrawerSheet(modifier = Modifier.width(300.dp), drawerContainerColor = MaterialTheme.colorScheme.surface) {
+        Column(Modifier.fillMaxSize()) {
+            Text("OmniHub", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(horizontal = 20.dp, vertical = 24.dp))
+            DrawerItem(Icons.Outlined.Edit, "New chat", onNewChat, accent = true)
+            DrawerItem(Icons.Outlined.ChatBubbleOutline, "Chats", {})
+            DrawerItem(Icons.Outlined.Folder, "Projects", {})
+            DrawerItem(Icons.Outlined.Extension, "MCP Servers", onOpenMcp)
+            HorizontalDivider(Modifier.padding(vertical = 12.dp, horizontal = 16.dp), color = MaterialTheme.colorScheme.outlineVariant)
+            Text("Recents", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp))
+            LazyColumn(Modifier.weight(1f)) {
+                items(history) { title ->
+                    Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.fillMaxWidth().clickable { onSelect(title) }.padding(horizontal = 20.dp, vertical = 12.dp))
+                }
+            }
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            Row(Modifier.fillMaxWidth().clickable(onClick = onOpenSettings).padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.size(36.dp).clip(CircleShape).background(Color(0xFF7C3AED)), contentAlignment = Alignment.Center) {
+                    Text(UserPrefs.getInitials(LocalContext.current), color = Color.White, fontWeight = FontWeight.Bold)
+                }
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
+                    val ctx = LocalContext.current
+                    Text(UserPrefs.getName(ctx).ifBlank { "User" }, fontWeight = FontWeight.Medium)
+                    Text("Free", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Icon(Icons.Default.Settings, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
     }
 }
 
 @Composable
-private fun HistoryDrawer(
-    history: List<String>,
-    onNewChat: () -> Unit,
-    onSelectHistory: (String) -> Unit,
-    onOpenAccount: () -> Unit,
-    onAddService: () -> Unit
-) {
-    ModalDrawerSheet(
-        modifier = Modifier.width(300.dp),
-        drawerContainerColor = MaterialTheme.colorScheme.surface
-    ) {
-        Column(Modifier.fillMaxSize()) {
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .padding(16.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text("History", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                IconButton(onClick = onNewChat) {
-                    Icon(Icons.Default.Edit, contentDescription = "New chat")
-                }
-            }
-            Divider()
-            LazyColumn(
-                modifier = Modifier.weight(1f),
-                contentPadding = PaddingValues(vertical = 8.dp)
-            ) {
-                items(history) { item ->
-                    NavigationDrawerItem(
-                        label = { Text(item, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                        selected = false,
-                        onClick = { onSelectHistory(item) },
-                        icon = { Icon(Icons.Outlined.ChatBubbleOutline, null) },
-                        modifier = Modifier.padding(horizontal = 12.dp)
-                    )
-                }
-            }
-            Divider()
-            Column(Modifier.padding(16.dp)) {
-                Text("Account", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.outline)
-                Spacer(Modifier.height(8.dp))
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(MaterialTheme.colorScheme.surfaceVariant)
-                        .clickable { onOpenAccount() }
-                        .padding(12.dp)
-                ) {
-                    Box(
-                        Modifier
-                            .size(36.dp)
-                            .clip(CircleShape)
-                            .background(MaterialTheme.colorScheme.primary),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text("O", color = Color.White, fontWeight = FontWeight.Bold)
-                    }
-                    Spacer(Modifier.width(12.dp))
-                    Column {
-                        Text("OmniHub User", fontWeight = FontWeight.Medium)
-                        Text("Free plan", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
-                    }
-                }
-                Spacer(Modifier.height(16.dp))
-                Text("Connected AI Services", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.outline)
-                Spacer(Modifier.height(8.dp))
-                listOf("OpenAI", "Anthropic", "MCP Server").forEach { name ->
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(Icons.Default.CheckCircle, null, tint = Color(0xFF22C55E), modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(8.dp))
-                        Text(name, style = MaterialTheme.typography.bodyMedium)
-                    }
-                }
-                Spacer(Modifier.height(8.dp))
-                OutlinedButton(
-                    onClick = onAddService,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Icon(Icons.Default.Add, null, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(8.dp))
-                    Text("Add AI Service")
-                }
-            }
-        }
+private fun DrawerItem(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, onClick: () -> Unit, accent: Boolean = false) {
+    Row(Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+        Icon(icon, null, tint = if (accent) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface, modifier = Modifier.size(22.dp))
+        Spacer(Modifier.width(16.dp))
+        Text(label, color = if (accent) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface, fontWeight = if (accent) FontWeight.Medium else FontWeight.Normal)
     }
 }
 
@@ -243,59 +239,117 @@ data class ChatBubble(val role: String, val content: String)
 @Composable
 private fun MessageBubble(bubble: ChatBubble) {
     val isUser = bubble.role == "user"
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
-    ) {
-        Surface(
-            shape = RoundedCornerShape(
-                topStart = 16.dp,
-                topEnd = 16.dp,
-                bottomStart = if (isUser) 16.dp else 4.dp,
-                bottomEnd = if (isUser) 4.dp else 16.dp
-            ),
-            color = if (isUser) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
-            tonalElevation = 1.dp
-        ) {
-            Text(
-                text = bubble.content,
-                modifier = Modifier.padding(14.dp),
-                color = if (isUser) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface,
-                style = MaterialTheme.typography.bodyLarge
-            )
+    Column(Modifier.fillMaxWidth(), horizontalAlignment = if (isUser) Alignment.End else Alignment.Start) {
+        Surface(shape = RoundedCornerShape(18.dp), color = if (isUser) MaterialTheme.colorScheme.surfaceVariant else Color.Transparent) {
+            Text(bubble.content, Modifier.padding(horizontal = 14.dp, vertical = 10.dp), style = MaterialTheme.typography.bodyLarge)
         }
     }
 }
 
 @Composable
-private fun MessageInputBar(
-    value: String,
-    onValueChange: (String) -> Unit,
-    onSend: () -> Unit
-) {
-    Surface(tonalElevation = 3.dp) {
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .padding(12.dp),
-            verticalAlignment = Alignment.Bottom
-        ) {
+private fun InputBar(value: String, onValueChange: (String) -> Unit, onPlusClick: () -> Unit, onSend: () -> Unit) {
+    Surface(color = MaterialTheme.colorScheme.background) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = onPlusClick, modifier = Modifier.size(40.dp).clip(CircleShape).background(MaterialTheme.colorScheme.surfaceVariant)) {
+                Icon(Icons.Default.Add, "Add", Modifier.size(22.dp))
+            }
+            Spacer(Modifier.width(8.dp))
             OutlinedTextField(
                 value = value,
                 onValueChange = onValueChange,
                 modifier = Modifier.weight(1f),
-                placeholder = { Text("Message OmniHub…") },
+                placeholder = { Text("Message OmniHub…", color = MaterialTheme.colorScheme.onSurfaceVariant) },
                 shape = RoundedCornerShape(24.dp),
-                maxLines = 5
+                colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = Color.Transparent, unfocusedBorderColor = Color.Transparent, focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant, unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant),
+                maxLines = 4,
+                trailingIcon = {
+                    if (value.isNotBlank()) {
+                        IconButton(onClick = onSend) { Icon(Icons.Default.ArrowUpward, "Send", tint = MaterialTheme.colorScheme.primary) }
+                    }
+                }
             )
             Spacer(Modifier.width(8.dp))
-            FilledIconButton(
-                onClick = onSend,
-                enabled = value.isNotBlank(),
-                shape = CircleShape
-            ) {
-                Icon(Icons.Default.Send, contentDescription = "Send")
+            IconButton(onClick = {}, modifier = Modifier.size(40.dp).clip(CircleShape).background(MaterialTheme.colorScheme.surfaceVariant)) {
+                Icon(Icons.Default.Mic, "Voice", Modifier.size(22.dp))
             }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun AddProviderSheet(onDismiss: () -> Unit, onOpenWebSession: () -> Unit, onSaved: () -> Unit) {
+    val context = LocalContext.current
+    val app = context.applicationContext as OmniHubApp
+    var apiKey by remember { mutableStateOf("") }
+    var error by remember { mutableStateOf<String?>(null) }
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(Modifier.fillMaxWidth().padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            Text("Add AI Provider", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+            OutlinedTextField(value = apiKey, onValueChange = { apiKey = it }, modifier = Modifier.fillMaxWidth(), label = { Text("API Key") }, placeholder = { Text("sk-… or AIza…") }, singleLine = true, shape = RoundedCornerShape(12.dp))
+            Button(
+                onClick = {
+                    try {
+                        ProviderBootstrap.saveAndRegister(context, app.registry, apiKey)
+                        error = null
+                        onSaved()
+                    } catch (e: Exception) {
+                        error = e.message
+                    }
+                },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = apiKey.isNotBlank(),
+                shape = RoundedCornerShape(12.dp)
+            ) { Text("Save & chat") }
+            if (error != null) Text(error!!, color = MaterialTheme.colorScheme.error)
+            HorizontalDivider()
+            Text("Open a provider site", style = MaterialTheme.typography.titleMedium)
+            Text("Sign in to copy an official API key. Cookie replay of ChatGPT/Claude web is not supported.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            OutlinedButton(onClick = onOpenWebSession, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp)) {
+                Icon(Icons.Default.Language, null)
+                Spacer(Modifier.width(8.dp))
+                Text("Web Sessions")
+            }
+            Spacer(Modifier.height(16.dp))
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun WebSessionSearchSheet(onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    var query by remember { mutableStateOf("") }
+    var results by remember { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
+    val catalog = listOf(
+        "Google AI Studio" to "https://aistudio.google.com",
+        "Gemini" to "https://gemini.google.com",
+        "OpenRouter" to "https://openrouter.ai",
+        "Groq" to "https://console.groq.com",
+        "OpenAI" to "https://platform.openai.com/api-keys",
+        "DeepSeek" to "https://platform.deepseek.com",
+        "Mistral" to "https://console.mistral.ai"
+    )
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(Modifier.fillMaxWidth().padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text("Provider sites", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+            Text("Opens the official site so you can copy an API key.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            OutlinedTextField(value = query, onValueChange = { query = it }, modifier = Modifier.fillMaxWidth(), label = { Text("Search") }, singleLine = true, shape = RoundedCornerShape(12.dp))
+            Button(onClick = { results = catalog.filter { it.first.contains(query, true) || it.second.contains(query, true) } }, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp)) { Text("Search") }
+            results.forEach { (name, url) ->
+                Card(onClick = {
+                    val intent = Intent(context, WebLoginActivity::class.java)
+                    intent.putExtra(WebLoginActivity.EXTRA_URL, url)
+                    intent.putExtra(WebLoginActivity.EXTRA_TITLE, name)
+                    context.startActivity(intent)
+                }, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp)) {
+                    Column(Modifier.padding(16.dp)) {
+                        Text(name, fontWeight = FontWeight.Medium)
+                        Text(url, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            }
+            Spacer(Modifier.height(24.dp))
         }
     }
 }
