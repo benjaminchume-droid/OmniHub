@@ -27,7 +27,6 @@ android {
                         val idx = it.indexOf("=")
                         it.substring(0, idx).trim() to it.substring(idx + 1).trim()
                     }
-                // Must use rootProject.file — plain file() resolves under app/
                 storeFile = rootProject.file(props.getValue("storeFile"))
                 storePassword = props.getValue("storePassword")
                 keyAlias = props.getValue("keyAlias")
@@ -38,13 +37,16 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            // Only attach signing if keystore actually exists
             val releaseSigning = signingConfigs.findByName("release")
             if (releaseSigning != null && releaseSigning.storeFile != null && releaseSigning.storeFile!!.exists()) {
                 signingConfig = releaseSigning
             }
+        }
+        debug {
+            isMinifyEnabled = false
         }
     }
 
@@ -86,6 +88,9 @@ dependencies {
     implementation("androidx.room:room-runtime:2.6.1")
     implementation("androidx.room:room-ktx:2.6.1")
     ksp("androidx.room:room-compiler:2.6.1")
+
+    // Encrypted API keys / sessions (Android Keystore)
+    implementation("androidx.security:security-crypto:1.1.0-alpha06")
 
     implementation("androidx.webkit:webkit:1.11.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
