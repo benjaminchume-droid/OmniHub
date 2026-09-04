@@ -79,4 +79,29 @@ class ChatRepository(context: Context) {
             .takeLast(limit)
             .map { ChatMessage(it.role, it.content) }
     }
+
+    suspend fun deleteAll() {
+        dao.deleteAllMessages()
+        dao.deleteAllConversations()
+    }
+
+    suspend fun exportAsJson(): String {
+        val convs = dao.getConversations()
+        val sb = StringBuilder()
+        sb.append("{\"exportedAt\":").append(System.currentTimeMillis()).append(",\"conversations\":[")
+        convs.forEachIndexed { i, c ->
+            if (i > 0) sb.append(",")
+            val safeTitle = c.title.replace("\\", "\\\\").replace("\"", "\\\"")
+            sb.append("{\"id\":\"").append(c.id).append("\",\"title\":\"").append(safeTitle).append("\",\"messages\":[")
+            val msgs = dao.getMessages(c.id)
+            msgs.forEachIndexed { j, m ->
+                if (j > 0) sb.append(",")
+                val safe = m.content.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n")
+                sb.append("{\"role\":\"").append(m.role).append("\",\"content\":\"").append(safe).append("\"}")
+            }
+            sb.append("]}")
+        }
+        sb.append("]}")
+        return sb.toString()
+    }
 }
