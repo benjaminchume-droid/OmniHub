@@ -8,25 +8,21 @@ import android.webkit.WebViewClient
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
+import com.omnihub.OmniHubApp
 import com.omnihub.data.SecureStore
+import com.omnihub.providers.impl.ProviderBootstrap
 
-/**
- * Primary web-session path.
- * User signs in inside the WebView. We continuously harvest cookies/tokens
- * and store them encrypted under the provider key. No need to copy anything.
- */
 class WebLoginActivity : ComponentActivity() {
     private lateinit var web: WebView
     private var providerKey: String = "session"
     private var lastCookies: String = ""
+    private var autoKeyRegistered = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val url = intent.getStringExtra(EXTRA_URL) ?: run { finish(); return }
         val title = intent.getStringExtra(EXTRA_TITLE) ?: "Provider"
-        providerKey = title.lowercase()
-            .replace(Regex("[^a-z0-9]+"), "_")
-            .trim('_')
+        providerKey = title.lowercase().replace(Regex("[^a-z0-9]+"), "_").trim('_')
 
         CookieManager.getInstance().setAcceptCookie(true)
         CookieManager.getInstance().setAcceptThirdPartyCookies(WebView(this), true)
@@ -47,8 +43,9 @@ class WebLoginActivity : ComponentActivity() {
                             var out = {};
                             for (var i=0;i<localStorage.length;i++){
                               var k=localStorage.key(i);
-                              if (/token|session|auth|access|refresh|key/i.test(k)) {
-                                out[k]=localStorage.getItem(k);
+                              var v=localStorage.getItem(k);
+                              if (/token|session|auth|access|refresh|key|api/i.test(k) || /sk-|gsk_|AIza|sk-ant|sk-or-|nvapi-|pplx-/i.test(v||'')) {
+                                out[k]=v;
                               }
                             }
                             return JSON.stringify(out);
@@ -56,13 +53,10 @@ class WebLoginActivity : ComponentActivity() {
                         })();
                         """.trimIndent()
                     ) { json ->
-                        if (json != null && json != "null" && json != "\"{}\"" && json.length > 5) {
-                            SecureStore.putSecret(
-                                this@WebLoginActivity,
-                                "web_local_$providerKey",
-                                json.trim('"').replace("\\\"", "\"")
-                            )
-                        }
+                        if (json == null || json == "null" || json.length < 5) return@evaluateJavascript
+                        val cleaned = json.trim().trim('"').replace("\\\"", "\"")
+                        SecureStore.putSecret(this@WebLoginActivity, "web_local_$providerKey", cleaned)
+                        tryExtractApiKey(cleaned)
                     }
                 }
             }
@@ -72,23 +66,36 @@ class WebLoginActivity : ComponentActivity() {
 
         Toast.makeText(
             this,
-            "Sign in. OmniHub captures the session automatically. Press back when finished.",
+            "Sign in. Sessions are captured. If an API key appears in page storage, chat can use it.",
             Toast.LENGTH_LONG
         ).show()
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
                 harvest(web.url ?: url)
-                if (lastCookies.isNotBlank()) {
-                    Toast.makeText(
-                        this@WebLoginActivity,
-                        "Session captured for $title",
-                        Toast.LENGTH_SHORT
-                    ).show()
+                val msg = when {
+                    autoKeyRegistered -> "API key found and registered \u2014 you can chat"
+                    lastCookies.isNotBlank() -> "Session captured for $title"
+                    else -> "Closed"
                 }
+                Toast.makeText(this@WebLoginActivity, msg, Toast.LENGTH_SHORT).show()
                 finish()
             }
         })
+    }
+
+    private fun tryExtractApiKey(jsonish: String) {
+        if (autoKeyRegistered) return
+        val pattern = Regex("(sk-ant-[A-Za-z0-9_\\-]{10,}|sk-or-[A-Za-z0-9_\\-]{10,}|sk-[A-Za-z0-9]{20,}|gsk_[A-Za-z0-9]{20,}|AIza[A-Za-z0-9_\\-]{20,}|nvapi-[A-Za-z0-9_\\-]{10,}|pplx-[A-Za-z0-9_\\-]{10,})")
+        val match = pattern.find(jsonish) ?: return
+        val key = match.value
+        try {
+            val app = applicationContext as OmniHubApp
+            ProviderBootstrap.saveAndRegister(this, app.registry, key)
+            autoKeyRegistered = true
+        } catch (_: Exception) {
+            SecureStore.setApiKey(this, providerKey, key)
+        }
     }
 
     private fun harvest(url: String) {
