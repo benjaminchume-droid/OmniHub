@@ -33,16 +33,27 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Ensure Gradle Wrapper JAR
+      - name: Prepare Gradle Wrapper
         run: |
           mkdir -p gradle/wrapper
           if [ ! -f gradle/wrapper/gradle-wrapper.jar ]; then
             echo "Downloading gradle-wrapper.jar..."
-            curl -sL -o gradle/wrapper/gradle-wrapper.jar \
-              "https://raw.githubusercontent.com/gradle/gradle/v8.7.0/gradle/wrapper/gradle-wrapper.jar"
+            curl -fsSL -o gradle/wrapper/gradle-wrapper.jar \
+              "https://github.com/gradle/gradle/raw/v8.7.0/gradle/wrapper/gradle-wrapper.jar"
           fi
-          chmod +x gradlew || true
+          if [ ! -f gradlew ]; then
+            echo "gradlew missing — creating minimal launcher"
+            cat > gradlew << 'SCRIPT'
+          #!/bin/sh
+          exec java -classpath "$(dirname "$0")/gradle/wrapper/gradle-wrapper.jar" org.gradle.wrapper.GradleWrapperMain "$@"
+          SCRIPT
+          fi
+          chmod +x gradlew
+          # normalize line endings in case of CRLF
+          sed -i 's/\r$//' gradlew || true
+          ls -la
           ls -la gradle/wrapper/
+          head -3 gradlew
 
       - name: Decode keystore
         env:
@@ -64,12 +75,25 @@ jobs:
 
       - name: Build APK
         run: |
+          run_gradle() {
+            if [ -x ./gradlew ] || [ -f ./gradlew ]; then
+              echo "Using bash ./gradlew $*"
+              bash ./gradlew "$@"
+            elif command -v gradle >/dev/null 2>&1; then
+              echo "Using system gradle $*"
+              gradle "$@"
+            else
+              echo "Neither gradlew nor gradle available"
+              exit 127
+            fi
+          }
+
           if [ -f keystore.properties ]; then
             echo "Building signed release APK..."
-            ./gradlew assembleRelease --stacktrace
+            run_gradle assembleRelease --stacktrace
           else
             echo "Building debug APK..."
-            ./gradlew assembleDebug --stacktrace
+            run_gradle assembleDebug --stacktrace
           fi
 
       - name: Find APK
