@@ -33,6 +33,17 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
+      - name: Ensure Gradle Wrapper JAR
+        run: |
+          mkdir -p gradle/wrapper
+          if [ ! -f gradle/wrapper/gradle-wrapper.jar ]; then
+            echo "Downloading gradle-wrapper.jar..."
+            curl -sL -o gradle/wrapper/gradle-wrapper.jar \
+              "https://raw.githubusercontent.com/gradle/gradle/v8.7.0/gradle/wrapper/gradle-wrapper.jar"
+          fi
+          chmod +x gradlew || true
+          ls -la gradle/wrapper/
+
       - name: Decode keystore
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
@@ -55,10 +66,10 @@ jobs:
         run: |
           if [ -f keystore.properties ]; then
             echo "Building signed release APK..."
-            gradle assembleRelease --stacktrace || ./gradlew assembleRelease --stacktrace
+            ./gradlew assembleRelease --stacktrace
           else
             echo "Building debug APK..."
-            gradle assembleDebug --stacktrace || ./gradlew assembleDebug --stacktrace
+            ./gradlew assembleDebug --stacktrace
           fi
 
       - name: Find APK
@@ -66,7 +77,8 @@ jobs:
         run: |
           APK=$(find app/build/outputs -name "*.apk" 2>/dev/null | head -1 || true)
           if [ -z "$APK" ]; then
-            echo "No APK produced — project still incomplete"
+            echo "No APK produced"
+            find app/build -type f 2>/dev/null | head -50 || true
             exit 1
           fi
           echo "path=$APK" >> $GITHUB_OUTPUT
@@ -82,7 +94,6 @@ jobs:
           body: |
             ## OmniHub v${{ github.event.inputs.version || '1.0.0' }}
             Universal AI aggregator + Android digital assistant.
-            Multi-provider routing with fallback, Web Sessions, MCP, Dark/Light/System theme.
           files: ${{ steps.apk.outputs.path }}
           generate_release_notes: true
         env:
