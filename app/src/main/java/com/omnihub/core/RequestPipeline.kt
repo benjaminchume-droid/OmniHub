@@ -17,7 +17,7 @@ class RequestPipeline(
         preferredModel: String? = null
     ): ChatResponse {
         val soul = soulManager.read()
-        val recent = history.getRecentMessages(conversationId, limit = 12)
+        val recent = history.getRecentAsChatMessages(conversationId, limit = 12)
         val messages = mutableListOf<ChatMessage>()
         if (soul.isNotBlank()) {
             messages.add(ChatMessage("system", "User memory:\n$soul"))
