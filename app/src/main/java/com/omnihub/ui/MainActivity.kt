@@ -61,7 +61,9 @@ fun OmniHubNav() {
         composable("chat") {
             ChatScreen(
                 onOpenSettings = { navController.navigate("settings") },
-                onOpenCustomize = { navController.navigate("customize") }
+                onOpenCustomize = { navController.navigate("customize") },
+                onOpenSkills = { navController.navigate("skills") },
+                onOpenProjects = { navController.navigate("projects") }
             )
         }
         composable("settings") {
@@ -76,6 +78,12 @@ fun OmniHubNav() {
         }
         composable("connectors") {
             ConnectorsScreen(onBack = { navController.popBackStack() })
+        }
+        composable("skills") {
+            SkillsScreen(onBack = { navController.popBackStack() })
+        }
+        composable("projects") {
+            ProjectsScreen(onBack = { navController.popBackStack() })
         }
         composable(
             "legal/{doc}",
