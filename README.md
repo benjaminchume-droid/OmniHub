@@ -1,96 +1,91 @@
-# OmniHub
+# OmniHub v1.0
 
 **Universal AI Aggregator + Android Digital Assistant**
 
-Inspired by [OmniRoute](https://github.com/diegosouzapw/OmniRoute) — the current king of self-hosted AI gateways — OmniHub brings the same multi-provider power **directly to your phone** and turns it into a real system-level digital assistant.
+Inspired by [OmniRoute](https://github.com/diegosouzapw/OmniRoute). OmniHub brings multi-provider power **directly to your phone** and can become the system digital assistant.
 
-## Core Vision
+## What's in v1.0
 
-- One app. Hundreds of models.
-- Bring your own API keys **or** use free web sessions (ChatGPT Web, Claude Web, Gemini Web, Grok Web, Kimi, Z.AI, etc.).
-- Intelligent routing (cost, latency, capability, quota).
-- Persistent `soul.md` — a living compressed memory that rides with every request and saves massive tokens.
-- Full local history (Room + SQLite).
-- MCP skills system.
-- Can become the phone’s **default digital assistant** (VoiceInteractionService + AssistIntent).
-- Theme skins that clone ChatGPT / Claude / Perplexity / DeepSeek / Grok looks.
-- Android-first, with future desktop/web companions.
+### UI (Grok / Perplexity / Claude style)
+- **Swipe left** (or hamburger) → History drawer
+- Top bar: **Temporary chat** icon + **New chat** button + Customize + Settings
+- **Customize** screen with tabs:
+  - Skills
+  - Behavior (custom instructions)
+  - Tone
+  - **MCP Server** (paste URL → connect → done)
+- Bottom of history drawer: Account + Connected AI Services + Add more
 
-## Supported Provider Types
+### Core
+- Multi-provider routing (OpenAI, Anthropic, Gemini, DeepSeek, xAI/Grok, Perplexity, Kimi, Z.AI, NVIDIA, Groq, Mistral, etc.)
+- Web Session provider stubs (ChatGPT Web, Claude Web, Gemini Web, Grok Web…)
+- `soul.md` persistent compressed memory
+- MCP client: paste server URL, connect, tools become available
+- VoiceInteractionService for default digital assistant
+- GitHub Actions workflow that builds and publishes APK releases
 
-| Type              | Examples                                      | Notes                                      |
-|-------------------|-----------------------------------------------|--------------------------------------------|
-| API Key           | OpenAI, Anthropic, Google, DeepSeek, xAI, Mistral, Groq, Together, Fireworks, NVIDIA NIM, Perplexity, Cohere, SiliconFlow, Kimi, Z.AI | Standard Bearer / x-api-key |
-| Free / No-Auth    | Pollinations, some Cloudflare AI | Zero key required |
-| Web Session       | ChatGPT Web, Claude Web, Gemini Web, Grok Web, Kimi Web, DeepSeek Web | Paste cookie / session token from browser |
-| Local             | Ollama, LM Studio, local GGUF via AICore | On-device when available |
+## MCP Server (Claude / Grok style)
 
-The router will keep expanding. Goal is the same as OmniRoute: support **everything we can get our hands on**.
+1. Open **Customize → MCP Server**
+2. Paste the MCP URL (SSE or Streamable HTTP)
+3. Tap **Connect MCP Server**
+4. Complete any login the server requires
+5. Done — its tools are now available
 
-## Architecture Highlights
+## Build & Release (GitHub Actions)
+
+The workflow `.github/workflows/build-release.yml` builds a signed APK and publishes it as a GitHub Release.
+
+### Required Secrets (Repo → Settings → Secrets and variables → Actions)
+
+| Secret | Value |
+|--------|-------|
+| `KEYSTORE_BASE64` | Base64 of the release keystore |
+| `KEYSTORE_PASSWORD` | Keystore password |
+| `KEY_ALIAS` | Key alias |
+| `KEY_PASSWORD` | Key password |
+
+A release keystore was generated for this project:
 
 ```
-User Prompt
-    ↓
-SoulCompressor (soul.md) + TokenOptimizer
-    ↓
-OmniRouter (score providers by cost/latency/capability/quota)
-    ↓
-Provider Executor (API Key / Web Session / Local)
-    ↓
-Response → History (Room) + Soul update
+Alias: omnihub
+Store password: omnihub2026
+Key password: omnihub2026
 ```
 
-- **soul.md** lives in app private storage and is continuously distilled.
-- Pre-request compression happens before any network call.
-- Web Session providers use WebView + CookieManager (or imported cookies) — same grey-area technique OmniRoute uses.
+To add the secret yourself:
 
-## Project Status
+1. Download / copy the base64 of `omnihub-release.jks` (or generate your own)
+2. Go to the repo **Settings → Secrets and variables → Actions → New repository secret**
+3. Name: `KEYSTORE_BASE64` → paste the base64
+4. Create the other three secrets with the passwords above (or your own)
 
-This is the **official bootstrap** of OmniHub.
+Then run the workflow manually (Actions → Build & Release APK → Run workflow) or push a tag `v1.0.0`.
 
-- Android app skeleton (Kotlin + Jetpack Compose)
-- Core routing + provider abstraction
-- Soul system
-- Local history stubs
-- Assistant service stub
-- Provider registry with 20+ providers already declared
-
-**Not production-ready yet.** Full web-session executors, polished UI skins, and complete assistant integration are next.
-
-## Quick Start (Developer)
+## Quick Start
 
 ```bash
 git clone https://github.com/benjaminchume-droid/OmniHub.git
 cd OmniHub
-# Open in Android Studio
-# Sync Gradle
-# Run on device/emulator (Android 8+)
+# Open in Android Studio → Sync → Run
 ```
 
-## Roadmap
+## Structure
 
-- [x] Repo + core architecture
-- [x] Provider registry (OpenAI, Anthropic, Gemini, DeepSeek, xAI/Grok, Perplexity, Mistral, Groq, NVIDIA, Together, Fireworks, Cohere, SiliconFlow, Kimi, Z.AI, Pollinations + Web Session stubs)
-- [x] OmniRouter scoring
-- [x] SoulManager + soul.md
-- [x] RequestPipeline
-- [x] VoiceInteractionService stub for default assistant
-- [ ] Full Web Session executors (cookie replay)
-- [ ] Room history implementation
-- [ ] Compose UI + theme skins
-- [ ] MCP skill loader
-- [ ] Settings for API keys + cookie import
-- [ ] Local LLM fallback
+```
+app/src/main/java/com/omnihub/
+├── ui/           # ChatScreen, CustomizeScreen, SettingsScreen, Theme
+├── mcp/          # McpClient (paste URL → connect)
+├── core/         # OmniRouter, RequestPipeline
+├── soul/         # SoulManager + soul.md
+├── providers/    # All AI providers
+└── assistant/    # VoiceInteractionService
+```
 
-## Legal / Reality Check
+## Legal Note
 
-Web-session providers work by using your logged-in browser session. This violates most providers’ Terms of Service. Accounts can be banned. Use at your own risk. Prefer official API keys whenever possible.
+Web-session providers use your browser cookies. This can violate provider ToS. Prefer official API keys.
 
 ## License
 
 MIT
-
----
-
-Built to be the phone’s brain.
