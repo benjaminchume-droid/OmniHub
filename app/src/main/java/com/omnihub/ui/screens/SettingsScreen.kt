@@ -50,16 +50,12 @@ fun SettingsScreen(
         }
     ) { padding ->
         Column(
-            Modifier
-                .fillMaxSize()
-                .padding(padding)
-                .verticalScroll(rememberScrollState())
-                .padding(16.dp),
+            Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()).padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Text("API Keys", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
             Text(
-                "Keys are stored with Android Keystore encryption. Web Sessions (Chat → +) is the recommended path.",
+                "Keys use Android Keystore. Paste a key and send a message \u2014 that is the path that replies.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -138,7 +134,7 @@ fun SettingsScreen(
             Text("App", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
             ListItem(
                 headlineContent = { Text("Version") },
-                supportingContent = { Text("1.0.0") },
+                supportingContent = { Text("1.0.1") },
                 leadingContent = { Icon(Icons.Default.Info, null) }
             )
             ListItem(
@@ -162,7 +158,7 @@ fun SettingsScreen(
                             } catch (_: Exception) {}
                         }
                         if (!launched) {
-                            Toast.makeText(context, "Open Settings → Apps → Default apps → Digital assistant", Toast.LENGTH_LONG).show()
+                            Toast.makeText(context, "Open Settings \u2192 Default apps \u2192 Digital assistant", Toast.LENGTH_LONG).show()
                         }
                     } catch (e: Exception) {
                         Toast.makeText(context, e.message ?: "Could not open settings", Toast.LENGTH_SHORT).show()
@@ -181,7 +177,7 @@ fun SettingsScreen(
         AlertDialog(
             onDismissRequest = { confirmDelete = false },
             title = { Text("Delete all data?") },
-            text = { Text("This permanently removes all conversations, API keys, and web sessions from this device. Cannot be undone.") },
+            text = { Text("This permanently removes all conversations, API keys, and web sessions from this device.") },
             confirmButton = {
                 TextButton(onClick = {
                     confirmDelete = false
