@@ -1,0 +1,12 @@
+-keepattributes *Annotation*
+-keepattributes SourceFile,LineNumberTable
+-keep public class * extends android.app.Activity
+-keep public class * extends android.app.Service
+-keep class com.omnihub.providers.** { *; }
+-keep class com.omnihub.mcp.** { *; }
+-dontwarn okhttp3.**
+-dontwarn retrofit2.**
+-keep class okhttp3.** { *; }
+-keep interface okhttp3.** { *; }
+-keep class androidx.security.crypto.** { *; }
+-dontwarn com.google.crypto.tink.**
