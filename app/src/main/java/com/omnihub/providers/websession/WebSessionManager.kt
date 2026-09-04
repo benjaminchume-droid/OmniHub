@@ -2,11 +2,8 @@ package com.omnihub.providers.websession
 
 import android.content.Context
 import android.webkit.CookieManager
+import com.omnihub.data.SecureStore
 
-/**
- * Universal Web Session manager.
- * Search any AI site, open WebView, user signs in, we harvest cookies.
- */
 class WebSessionManager(private val context: Context) {
 
     data class Site(
@@ -45,17 +42,12 @@ class WebSessionManager(private val context: Context) {
     }
 
     fun saveSession(providerId: String, cookieHeader: String) {
-        context.getSharedPreferences("omnihub_sessions", Context.MODE_PRIVATE)
-            .edit().putString("session_$providerId", cookieHeader).apply()
+        SecureStore.setSession(context, providerId, cookieHeader)
     }
 
-    fun getSession(providerId: String): String? {
-        return context.getSharedPreferences("omnihub_sessions", Context.MODE_PRIVATE)
-            .getString("session_$providerId", null)
-    }
+    fun getSession(providerId: String): String? =
+        SecureStore.getSession(context, providerId)
 
-    fun clearSession(providerId: String) {
-        context.getSharedPreferences("omnihub_sessions", Context.MODE_PRIVATE)
-            .edit().remove("session_$providerId").apply()
-    }
+    fun clearSession(providerId: String) =
+        SecureStore.clearSession(context, providerId)
 }
