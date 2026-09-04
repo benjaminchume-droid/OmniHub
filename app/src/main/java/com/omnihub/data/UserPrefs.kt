@@ -2,10 +2,7 @@ package com.omnihub.data
 
 import android.content.Context
 
-/**
- * Local user profile & first-run state.
- * Never hardcodes personal data — collected once at setup.
- */
+/** Local profile & first-run state. Secrets use SecureStore. */
 object UserPrefs {
     private const val PREFS = "omnihub_user"
 
@@ -17,6 +14,18 @@ object UserPrefs {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .edit().putBoolean("setup_complete", true).apply()
     }
+
+    fun markLegalAccepted(context: Context) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean("legal_accepted", true)
+            .putLong("legal_accepted_at", System.currentTimeMillis())
+            .apply()
+    }
+
+    fun hasAcceptedLegal(context: Context): Boolean =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getBoolean("legal_accepted", false)
 
     fun saveProfile(context: Context, name: String, age: Int?, bio: String?) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
