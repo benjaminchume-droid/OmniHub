@@ -3,19 +3,11 @@ package com.omnihub.mcp
 import android.content.Context
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
-import java.util.concurrent.TimeUnit
 
 /**
- * MCP (Model Context Protocol) client.
- * User pastes an MCP server URL (SSE or Streamable HTTP), completes any login,
- * and the server's tools become available to the model.
- *
- * Flow mirrors Claude / Grok style: paste URL → connect → done.
+ * MCP client: paste URL → connect → authorize → tools available.
+ * URL validation reduces injection risk.
  */
 class McpClient(private val context: Context) {
 
@@ -36,12 +28,29 @@ class McpClient(private val context: Context) {
 
     enum class Transport { SSE, STREAMABLE_HTTP, STDIO }
 
-    private val client = OkHttpClient.Builder()
-        .connectTimeout(20, TimeUnit.SECONDS)
-        .readTimeout(60, TimeUnit.SECONDS)
-        .build()
-
     private val prefs = context.getSharedPreferences("omnihub_mcp", Context.MODE_PRIVATE)
+
+    fun validateUrl(raw: String): String {
+        val url = raw.trim()
+        require(url.length in 8..2048) { "MCP URL length invalid" }
+        require(
+            url.startsWith("https://") ||
+            url.startsWith("http://") ||
+            url.startsWith("mcp://") ||
+            url.startsWith("mcp+sse://")
+        ) { "MCP URL must use https, http, or mcp scheme" }
+        require(!url.contains(Regex("[;|&`$<>]"))) { "MCP URL contains forbidden characters" }
+        return url
+    }
+
+    fun validateToolArgs(args: Map<String, Any?>, maxKeys: Int = 32, maxValueLen: Int = 8192) {
+        require(args.size <= maxKeys) { "Too many tool arguments" }
+        args.forEach { (k, v) ->
+            require(k.length <= 128) { "Argument name too long" }
+            val s = v?.toString() ?: ""
+            require(s.length <= maxValueLen) { "Argument value too long: $k" }
+        }
+    }
 
     fun saveServer(server: McpServer) {
         val json = JSONObject().apply {
@@ -70,10 +79,11 @@ class McpClient(private val context: Context) {
 
     suspend fun connect(url: String, name: String = "MCP Server"): Result<McpServer> = withContext(Dispatchers.IO) {
         try {
+            val safeUrl = validateUrl(url)
             val server = McpServer(
                 id = java.util.UUID.randomUUID().toString(),
-                name = name.ifBlank { "MCP @ ${url.take(40)}" },
-                url = url,
+                name = name.ifBlank { "MCP @ ${safeUrl.take(40)}" },
+                url = safeUrl,
                 transport = Transport.SSE,
                 connected = true
             )
