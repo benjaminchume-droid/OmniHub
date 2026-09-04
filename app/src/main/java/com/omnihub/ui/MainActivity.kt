@@ -8,9 +8,11 @@ import androidx.compose.material3.Surface
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import androidx.navigation.navArgument
 import com.omnihub.data.UserPrefs
 import com.omnihub.ui.screens.*
 import com.omnihub.ui.theme.OmniHubTheme
@@ -22,9 +24,27 @@ class MainActivity : ComponentActivity() {
             OmniHubTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
                     val context = LocalContext.current
-                    var setupDone by remember { mutableStateOf(UserPrefs.isSetupComplete(context)) }
+                    var setupDone by remember {
+                        mutableStateOf(UserPrefs.isSetupComplete(context) && UserPrefs.hasAcceptedLegal(context))
+                    }
+                    val navController = rememberNavController()
+
                     if (!setupDone) {
-                        OnboardingScreen(onComplete = { setupDone = true })
+                        NavHost(navController = navController, startDestination = "onboarding") {
+                            composable("onboarding") {
+                                OnboardingScreen(
+                                    onComplete = { setupDone = true },
+                                    onOpenLegal = { doc -> navController.navigate("legal/${doc.name}") }
+                                )
+                            }
+                            composable(
+                                "legal/{doc}",
+                                arguments = listOf(navArgument("doc") { type = NavType.StringType })
+                            ) { entry ->
+                                val doc = LegalDoc.valueOf(entry.arguments?.getString("doc") ?: LegalDoc.TERMS.name)
+                                LegalScreen(doc = doc, onBack = { navController.popBackStack() })
+                            }
+                        }
                     } else {
                         OmniHubNav()
                     }
@@ -47,7 +67,8 @@ fun OmniHubNav() {
         composable("settings") {
             SettingsScreen(
                 onBack = { navController.popBackStack() },
-                onOpenConnectors = { navController.navigate("connectors") }
+                onOpenConnectors = { navController.navigate("connectors") },
+                onOpenLegal = { doc -> navController.navigate("legal/${doc.name}") }
             )
         }
         composable("customize") {
@@ -55,6 +76,13 @@ fun OmniHubNav() {
         }
         composable("connectors") {
             ConnectorsScreen(onBack = { navController.popBackStack() })
+        }
+        composable(
+            "legal/{doc}",
+            arguments = listOf(navArgument("doc") { type = NavType.StringType })
+        ) { entry ->
+            val doc = LegalDoc.valueOf(entry.arguments?.getString("doc") ?: LegalDoc.PRIVACY.name)
+            LegalScreen(doc = doc, onBack = { navController.popBackStack() })
         }
     }
 }
