@@ -10,7 +10,7 @@ import java.util.concurrent.TimeUnit
 
 object SourceCatalog {
     const val DEFAULT_INDEX =
-        "https://raw.githubusercontent.com/benjaminchume-droid/OmniHub/main/sources/index.min.json"
+        "https://raw.githubusercontent.com/benjaminchume-droid/OmniHub-Sources/main/catalog/index.min.json"
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
@@ -51,6 +51,7 @@ object SourceCatalog {
                     kind = o.optString("kind", "API"),
                     authType = o.optString("authType", "API_KEY"),
                     version = o.optInt("version", 1),
+                    revision = o.optString("revision", "1.0.0"),
                     description = o.optString("description", ""),
                     websiteUrl = o.optString("websiteUrl", ""),
                     baseUrl = o.optString("baseUrl", "").ifBlank { null },

@@ -4,13 +4,12 @@ import android.content.Context
 import com.omnihub.source.AiSource
 
 /**
- * Base class for extensions to inherit from.
- * Extensions must implement this interface in their APK.
+ * Base class for APK extensions. Subclasses implement chat/info/isConfigured.
  */
-abstract class ExtensionSource(context: Context) : AiSource {
-    protected val context = context
-    
-    open suspend fun onInstall() {}
+abstract class ExtensionSource(
+    protected val appContext: Context
+) : AiSource {
+    override suspend fun onInstall() {}
+    override suspend fun onUninstall() {}
     open suspend fun onUpdate(fromVersion: String) {}
-    open suspend fun onUninstall() {}
 }
