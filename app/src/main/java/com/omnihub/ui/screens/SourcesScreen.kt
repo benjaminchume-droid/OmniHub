@@ -48,7 +48,7 @@ fun SourcesScreen(onBack: () -> Unit) {
                 actions = {
                     IconButton(onClick = {
                         scope.launch {
-                            catalogStatus = "Fetching catalog\u2026"
+                            catalogStatus = "Fetching catalog…"
                             try {
                                 catalog = SourceCatalog.fetch()
                                 catalogStatus = "Catalog: ${catalog.size} sources"
@@ -60,44 +60,33 @@ fun SourcesScreen(onBack: () -> Unit) {
         }
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
-            TabRow(selectedTabIndex = tab, containerColor = Color.Transparent) {
+            TabRow(selectedTabIndex = tab) {
                 Tab(selected = tab == 0, onClick = { tab = 0 }, text = { Text("Installed") })
                 Tab(selected = tab == 1, onClick = { tab = 1 }, text = { Text("Catalog") })
                 Tab(selected = tab == 2, onClick = { tab = 2 }, text = { Text("Failures") })
             }
+            catalogStatus?.let { Text(it, Modifier.padding(12.dp), style = MaterialTheme.typography.bodySmall) }
             when (tab) {
                 0 -> LazyColumn(Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    item {
-                        Text("Configure API key or Web login. Routing uses every configured source with fallback.",
-                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        TextButton(onClick = {
-                            try {
-                                context.startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES).apply {
-                                    data = Uri.parse("package:${context.packageName}")
-                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                })
-                            } catch (_: Exception) {
-                                Toast.makeText(context, "Open Settings \u2192 Install unknown apps", Toast.LENGTH_LONG).show()
-                            }
-                        }) { Text("Allow install from unknown sources") }
-                    }
                     items(sources, key = { it.info.id }) { src ->
                         SourceCard(
                             source = src,
-                            enabled = app.sourceManager.isEnabled(src.info.id),
+                            enabled = src.isConfigured(),
                             failures = app.issueReporter.failureCount(src.info.id),
-                            onToggle = { app.sourceManager.setEnabled(src.info.id, it) },
-                            onConfigure = { configSource = src; apiKeyDraft = "" },
+                            onToggle = {},
+                            onConfigure = {
+                                configSource = src
+                                apiKeyDraft = ""
+                            },
                             onReport = {
-                                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(
-                                    app.issueReporter.githubIssueUrl(src.info.id, src.info.name))))
+                                val err = app.issueReporter.lastError(src.info.id) ?: "unknown"
+                                Toast.makeText(context, err.take(200), Toast.LENGTH_LONG).show()
                             }
                         )
                     }
                 }
                 1 -> LazyColumn(Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     item {
-                        catalogStatus?.let { Text(it, color = OmniAmber) }
                         Button(onClick = {
                             scope.launch {
                                 try {
@@ -113,7 +102,7 @@ fun SourcesScreen(onBack: () -> Unit) {
                         Card(shape = RoundedCornerShape(12.dp), modifier = Modifier.fillMaxWidth()) {
                             Column(Modifier.padding(12.dp)) {
                                 Text(d.name, fontWeight = FontWeight.Medium)
-                                Text("${d.kind} \u00b7 v${d.version}", style = MaterialTheme.typography.bodySmall)
+                                Text("${d.kind} · v${d.version}", style = MaterialTheme.typography.bodySmall)
                                 Text(d.description, style = MaterialTheme.typography.bodySmall)
                                 TextButton(onClick = {
                                     app.sourceManager.installDescriptor(d)
@@ -129,15 +118,9 @@ fun SourcesScreen(onBack: () -> Unit) {
                     items(fails) { (id, count, err) ->
                         Card(Modifier.fillMaxWidth()) {
                             Column(Modifier.padding(12.dp)) {
-                                Text("$id \u00d7$count", fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.error)
+                                Text("$id ×$count", fontWeight = FontWeight.SemiBold)
                                 Text(err, style = MaterialTheme.typography.bodySmall)
-                                Row {
-                                    TextButton(onClick = {
-                                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(
-                                            app.issueReporter.githubIssueUrl(id, id))))
-                                    }) { Text("Open GitHub issue") }
-                                    TextButton(onClick = { app.issueReporter.clear(id) }) { Text("Clear") }
-                                }
+                                TextButton(onClick = { app.issueReporter.clear(id) }) { Text("Clear") }
                             }
                         }
                     }
@@ -154,16 +137,20 @@ fun SourcesScreen(onBack: () -> Unit) {
                 Column {
                     Text(src.info.description, style = MaterialTheme.typography.bodySmall)
                     Spacer(Modifier.height(8.dp))
-                    if (src.info.authType == AuthType.API_KEY || src.info.authType == AuthType.BOTH) {
-                        OutlinedTextField(value = apiKeyDraft, onValueChange = { apiKeyDraft = it },
-                            label = { Text("API key") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                    if (src.info.authType == AuthType.API_KEY) {
+                        OutlinedTextField(
+                            value = apiKeyDraft,
+                            onValueChange = { apiKeyDraft = it },
+                            label = { Text("API key") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
                     }
                 }
             },
             confirmButton = {
                 Row {
-                    if (src.info.authType == AuthType.WEB_LOGIN || src.info.authType == AuthType.BOTH ||
-                        src.info.kind == SourceKind.WEB_SESSION) {
+                    if (src.info.authType == AuthType.WEB_SESSION || src.info.kind == SourceKind.WEB_SESSION) {
                         TextButton(onClick = {
                             val url = src.info.websiteUrl.ifBlank { "https://chatgpt.com" }
                             context.startActivity(Intent(context, WebLoginActivity::class.java).apply {
@@ -201,7 +188,7 @@ private fun SourceCard(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text(source.info.name, fontWeight = FontWeight.SemiBold)
-                    Text("${source.info.kind} \u00b7 ${source.info.authType}", style = MaterialTheme.typography.bodySmall)
+                    Text("${source.info.kind} · ${source.info.authType}", style = MaterialTheme.typography.bodySmall)
                 }
                 Switch(checked = enabled, onCheckedChange = onToggle)
             }
