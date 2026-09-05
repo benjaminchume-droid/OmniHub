@@ -21,6 +21,7 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import com.omnihub.OmniHubApp
 import com.omnihub.data.SecureStore
+import com.omnihub.data.UserPrefs
 import kotlinx.coroutines.launch
 import java.io.File
 
@@ -29,13 +30,25 @@ import java.io.File
 fun SettingsScreen(
     onBack: () -> Unit,
     onOpenConnectors: () -> Unit,
-    onOpenLegal: (LegalDoc) -> Unit
+    onOpenLegal: (LegalDoc) -> Unit,
+    onOpenAnalytics: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val app = context.applicationContext as OmniHubApp
     val scope = rememberCoroutineScope()
     var status by remember { mutableStateOf<String?>(null) }
     var confirmDelete by remember { mutableStateOf(false) }
+    var collect by remember { mutableStateOf(UserPrefs.isAnalyticsCollectionEnabled(context)) }
+    var language by remember { mutableStateOf(UserPrefs.isLanguageAnalysisEnabled(context)) }
+    var personality by remember { mutableStateOf(UserPrefs.isPersonalityInsightsEnabled(context)) }
+    var analyticsSummary by remember { mutableStateOf("Your Omni activity") }
+
+    LaunchedEffect(Unit) {
+        try {
+            val snap = app.analyticsRepo.snapshot(30)
+            analyticsSummary = com.omnihub.analytics.AnalyticsEntitlement.compactSummaryLabel(snap)
+        } catch (_: Exception) {}
+    }
 
     Scaffold(
         topBar = {
@@ -53,9 +66,49 @@ fun SettingsScreen(
             Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()).padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
+            Text("Omni", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            ListItem(
+                headlineContent = { Text("Analytics") },
+                supportingContent = { Text(analyticsSummary) },
+                leadingContent = { Icon(Icons.Default.Analytics, null) },
+                trailingContent = { Icon(Icons.Default.ChevronRight, null) },
+                modifier = Modifier.clickable { onOpenAnalytics() }
+            )
+
+            Divider(Modifier.padding(vertical = 8.dp))
+            Text("Privacy", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            ListItem(
+                headlineContent = { Text("Analytics collection") },
+                trailingContent = {
+                    Switch(checked = collect, onCheckedChange = {
+                        collect = it
+                        UserPrefs.setAnalyticsCollectionEnabled(context, it)
+                    })
+                }
+            )
+            ListItem(
+                headlineContent = { Text("Language analysis") },
+                trailingContent = {
+                    Switch(checked = language, onCheckedChange = {
+                        language = it
+                        UserPrefs.setLanguageAnalysisEnabled(context, it)
+                    })
+                }
+            )
+            ListItem(
+                headlineContent = { Text("Personality insights") },
+                trailingContent = {
+                    Switch(checked = personality, onCheckedChange = {
+                        personality = it
+                        UserPrefs.setPersonalityInsightsEnabled(context, it)
+                    })
+                }
+            )
+
+            Divider(Modifier.padding(vertical = 8.dp))
             Text("API Keys", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
             Text(
-                "Keys use Android Keystore. Paste a key and send a message \u2014 that is the path that replies.",
+                "Keys use Android Keystore. Paste a key and send a message — that is the path that replies.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -71,7 +124,7 @@ fun SettingsScreen(
             ProviderKeyField("NVIDIA", "nvidia")
             ProviderKeyField("Z.AI", "zai")
 
-            HorizontalDivider(Modifier.padding(vertical = 8.dp))
+            Divider(Modifier.padding(vertical = 8.dp))
             Text("Connectors", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
             ListItem(
                 headlineContent = { Text("MCP / Connectors") },
@@ -81,7 +134,7 @@ fun SettingsScreen(
                 modifier = Modifier.clickable { onOpenConnectors() }
             )
 
-            HorizontalDivider(Modifier.padding(vertical = 8.dp))
+            Divider(Modifier.padding(vertical = 8.dp))
             Text("Data & Privacy", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
             ListItem(
                 headlineContent = { Text("Export my data") },
@@ -109,7 +162,7 @@ fun SettingsScreen(
                 modifier = Modifier.clickable { confirmDelete = true }
             )
 
-            HorizontalDivider(Modifier.padding(vertical = 8.dp))
+            Divider(Modifier.padding(vertical = 8.dp))
             Text("Legal", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
             ListItem(
                 headlineContent = { Text("Privacy Policy") },
@@ -130,11 +183,11 @@ fun SettingsScreen(
                 modifier = Modifier.clickable { onOpenLegal(LegalDoc.COMMUNITY) }
             )
 
-            HorizontalDivider(Modifier.padding(vertical = 8.dp))
+            Divider(Modifier.padding(vertical = 8.dp))
             Text("App", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
             ListItem(
                 headlineContent = { Text("Version") },
-                supportingContent = { Text("1.0.1") },
+                supportingContent = { Text("1.0.2") },
                 leadingContent = { Icon(Icons.Default.Info, null) }
             )
             ListItem(
@@ -158,7 +211,7 @@ fun SettingsScreen(
                             } catch (_: Exception) {}
                         }
                         if (!launched) {
-                            Toast.makeText(context, "Open Settings \u2192 Default apps \u2192 Digital assistant", Toast.LENGTH_LONG).show()
+                            Toast.makeText(context, "Open Settings → Default apps → Digital assistant", Toast.LENGTH_LONG).show()
                         }
                     } catch (e: Exception) {
                         Toast.makeText(context, e.message ?: "Could not open settings", Toast.LENGTH_SHORT).show()
