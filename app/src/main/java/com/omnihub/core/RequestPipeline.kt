@@ -16,11 +16,11 @@ class RequestPipeline(
         userPrompt: String,
         preferredModel: String? = null
     ): ChatResponse {
-        val soul = soulManager.read()
+        val soul = soulManager.generatePromptContext(maxUnits = 8)
         val recent = history.getRecentAsChatMessages(conversationId, limit = 12)
         val messages = mutableListOf<ChatMessage>()
         if (soul.isNotBlank()) {
-            messages.add(ChatMessage("system", "User memory:\n$soul"))
+            messages.add(ChatMessage("system", soul))
         }
         messages.addAll(recent)
         messages.add(ChatMessage("user", userPrompt))
@@ -32,7 +32,12 @@ class RequestPipeline(
         val response = router.chatWithFallback(request)
         history.addMessage(conversationId, "user", userPrompt)
         history.addMessage(conversationId, "assistant", response.content)
-        soulManager.append("Q: ${userPrompt.take(200)}\nA: ${response.content.take(400)}")
+        soulManager.learnFromExchange(
+            sourceId = response.providerId,
+            messages = messages,
+            assistantReply = response.content,
+            conversationId = conversationId
+        )
         return response
     }
 }

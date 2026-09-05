@@ -7,7 +7,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 
 enum class SourceKind {
-    API, WEB, MCP, APP, TOOL, AGENT, SKILL, HYBRID, LOCAL, EXTENSION
+    API, WEB, WEB_SESSION, MCP, APP, TOOL, AGENT, SKILL, HYBRID, LOCAL, EXTENSION
 }
 
 enum class AuthType {
