@@ -34,6 +34,7 @@ jobs:
               "https://github.com/gradle/gradle/raw/v8.7.0/gradle/wrapper/gradle-wrapper.jar"
           fi
           test -s gradle/wrapper/gradle-wrapper.jar
+          ls -la gradle/wrapper/ gradlew
 
       - name: Decode Keystore
         env:
@@ -45,21 +46,34 @@ jobs:
           elif [ -n "$KEYSTORE" ]; then
             echo "$KEYSTORE" | base64 --decode > keystore.jks
           else
-            echo "No keystore secret; unsigned path may still work"
+            echo "No keystore secret; building unsigned release"
           fi
 
-      - name: Build Release APK
-        run: ./gradlew assembleRelease --stacktrace
+      - name: Build APK
+        run: |
+          ./gradlew assembleRelease --stacktrace 2>&1 | tee build.log
+          status=${PIPESTATUS[0]}
+          if [ $status -ne 0 ]; then
+            echo "assembleRelease failed; trying assembleDebug"
+            ./gradlew assembleDebug --stacktrace 2>&1 | tee -a build.log
+            status=$?
+          fi
+          # Print Kotlin errors for CI visibility
+          grep -E "^e: |error:|FAILED|Unresolved" build.log | tail -80 || true
+          exit $status
         env:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
 
       - name: Upload APK artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: omnihub-apk
-          path: app/build/outputs/apk/**/*.apk
+          path: |
+            app/build/outputs/apk/**/*.apk
+            build.log
           if-no-files-found: warn
 
       - name: Release on tag
