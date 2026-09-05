@@ -53,11 +53,11 @@ object SourceCatalog {
                     version = o.optInt("version", 1),
                     description = o.optString("description", ""),
                     websiteUrl = o.optString("websiteUrl", ""),
-                    baseUrl = o.optString("baseUrl", null),
-                    chatPath = o.optString("chatPath", null),
+                    baseUrl = o.optString("baseUrl", "").ifBlank { null },
+                    chatPath = o.optString("chatPath", "").ifBlank { null },
                     models = models,
                     headers = headers,
-                    apkUrl = o.optString("apkUrl", null),
+                    apkUrl = o.optString("apkUrl", "").ifBlank { null },
                     nsfw = o.optBoolean("nsfw", false)
                 )
             )
