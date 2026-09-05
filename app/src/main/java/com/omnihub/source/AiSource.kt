@@ -1,123 +1,108 @@
 package com.omnihub.source
 
-import com.omnihub.providers.ChatRequest
+import com.omnihub.providers.ChatMessage
 import com.omnihub.providers.ChatResponse
 import com.omnihub.providers.ModelInfo
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
 
-/**
- * Abstract interface for all AI sources (bundled, remote, web, or extensions).
- * Replaces provider-specific implementations with a unified protocol.
- */
-interface AiSource {
-    /**
-     * Unique identifier: "openai", "anthropic", "chatgpt-web", etc.
-     */
-    val id: String
-
-    /**
-     * Display name: "ChatGPT", "Claude", "ChatGPT (Web)"
-     */
-    val name: String
-
-    /**
-     * Brief description
-     */
-    val description: String
-
-    /**
-     * Icon drawable resource ID
-     */
-    val icon: Int
-
-    /**
-     * Source type: API, WEB_SESSION, EXTENSION, MCP
-     */
-    val type: SourceType
-
-    /**
-     * Authentication type required
-     */
-    val authType: AuthType
-
-    /**
-     * Available models/models for this source
-     */
-    val models: List<ModelInfo>
-
-    /**
-     * Default model if user doesn't specify
-     */
-    val defaultModel: String
-
-    /**
-     * Source version (for updates)
-     */
-    val version: String
-
-    /**
-     * Whether source is currently enabled and ready
-     */
-    val isEnabled: Boolean
-
-    /**
-     * Send single chat request and wait for response
-     */
-    suspend fun chat(request: ChatRequest): ChatResponse
-
-    /**
-     * Stream response as it arrives
-     */
-    suspend fun stream(request: ChatRequest): Flow<String>
-
-    /**
-     * Verify if credentials/auth is valid
-     */
-    suspend fun validateCredentials(): Boolean
-
-    /**
-     * Get estimated cost for a request (in USD or source-specific currency)
-     */
-    fun estimateCost(inputTokens: Int, outputTokens: Int): Double
-
-    /**
-     * Get average latency for this source (in ms)
-     */
-    fun getAverageLatency(): Long
-
-    /**
-     * Get reliability score (0.0 to 1.0)
-     */
-    fun getReliabilityScore(): Double
-
-    /**
-     * Called when source is installed
-     */
-    suspend fun onInstall() {}
-
-    /**
-     * Called when source is being updated
-     */
-    suspend fun onUpdate(fromVersion: String) {}
-
-    /**
-     * Called when source is uninstalled
-     */
-    suspend fun onUninstall() {}
-}
-
-enum class SourceType {
-    API,                // OpenAI, Anthropic, etc.
-    WEB_SESSION,       // ChatGPT.com, Claude.ai, etc.
-    EXTENSION,         // APK extension
-    MCP,               // Model Context Protocol
-    LOCAL              // Local model (Ollama, etc.)
+enum class SourceKind {
+    API, WEB, MCP, APP, TOOL, AGENT, SKILL, HYBRID, LOCAL, EXTENSION
 }
 
 enum class AuthType {
-    API_KEY,           // "sk-..." style
-    WEB_SESSION,       // Cookies, localStorage
-    USERNAME_PASSWORD, // Direct auth
-    OAUTH2,            // OAuth flow
-    NONE               // No auth (local models)
+    API_KEY, WEB_SESSION, OAUTH2, USERNAME_PASSWORD, NONE
 }
+
+enum class SourceHealth {
+    HEALTHY, DEGRADED, AUTH_REQUIRED, UPDATE_REQUIRED, INCOMPATIBLE, OFFLINE, UNKNOWN
+}
+
+enum class UpdatePolicy {
+    STARTUP, HOURLY, DAILY, WEEKLY, MONTHLY, MANUAL, NEVER
+}
+
+data class SourceCapabilities(
+    val chat: Boolean = true,
+    val stream: Boolean = false,
+    val vision: Boolean = false,
+    val tools: Boolean = false,
+    val research: Boolean = false,
+    val coding: Boolean = false,
+    val multimodal: Boolean = false
+)
+
+data class SourceInfo(
+    val id: String,
+    val name: String,
+    val kind: SourceKind,
+    val authType: AuthType,
+    val description: String = "",
+    val websiteUrl: String = "",
+    val revision: String = "1.0.0",
+    val publisher: String = "OmniHub",
+    val category: String = "ai",
+    val bundled: Boolean = false,
+    val minOmniHubVersion: String = "1.0.2",
+    val updatePolicy: UpdatePolicy = UpdatePolicy.MANUAL,
+    val updateEndpoint: String? = null,
+    val capabilities: SourceCapabilities = SourceCapabilities()
+)
+
+data class SourceConfig(
+    val apiKey: String? = null,
+    val sessionCookie: String? = null,
+    val extra: Map<String, String> = emptyMap()
+)
+
+data class SourceChatRequest(
+    val messages: List<ChatMessage>,
+    val model: String? = null,
+    val temperature: Double = 0.7,
+    val maxTokens: Int? = null,
+    val memoryContext: String? = null,
+    val conversationId: String? = null
+)
+
+interface AiSource {
+    val info: SourceInfo
+    val models: List<ModelInfo>
+        get() = emptyList()
+    val defaultModel: String
+        get() = models.firstOrNull()?.id ?: ""
+
+    fun isConfigured(): Boolean
+    fun health(): SourceHealth =
+        when {
+            !isConfigured() && info.authType != AuthType.NONE -> SourceHealth.AUTH_REQUIRED
+            else -> SourceHealth.HEALTHY
+        }
+
+    suspend fun configure(config: SourceConfig) {}
+    suspend fun chat(request: SourceChatRequest): ChatResponse
+    suspend fun stream(request: SourceChatRequest): Flow<String> = flow {
+        emit(chat(request).content)
+    }
+    suspend fun validateCredentials(): Boolean = isConfigured()
+    suspend fun onInstall() {}
+    suspend fun onUninstall() {}
+}
+
+data class SourceDescriptor(
+    val id: String,
+    val name: String,
+    val kind: String = "API",
+    val authType: String = "API_KEY",
+    val version: Int = 1,
+    val revision: String = "1.0.0",
+    val description: String = "",
+    val websiteUrl: String = "",
+    val baseUrl: String? = null,
+    val chatPath: String? = null,
+    val models: List<String> = emptyList(),
+    val headers: Map<String, String> = emptyMap(),
+    val apkUrl: String? = null,
+    val nsfw: Boolean = false,
+    val capabilities: List<String> = emptyList(),
+    val updatePolicy: String = "manual"
+)
