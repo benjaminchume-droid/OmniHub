@@ -12,6 +12,12 @@ object SourceCatalog {
     const val DEFAULT_INDEX =
         "https://raw.githubusercontent.com/benjaminchume-droid/OmniHub-Sources/main/catalog/index.min.json"
 
+    private val PARTS = listOf(
+        "https://raw.githubusercontent.com/benjaminchume-droid/OmniHub-Sources/main/catalog/api.min.json",
+        "https://raw.githubusercontent.com/benjaminchume-droid/OmniHub-Sources/main/catalog/web.min.json",
+        "https://raw.githubusercontent.com/benjaminchume-droid/OmniHub-Sources/main/catalog/mcp.min.json"
+    )
+
     private val client = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
@@ -19,13 +25,28 @@ object SourceCatalog {
 
     suspend fun fetch(indexUrl: String = DEFAULT_INDEX): List<SourceDescriptor> =
         withContext(Dispatchers.IO) {
-            val req = Request.Builder().url(indexUrl).get().build()
-            client.newCall(req).execute().use { resp ->
-                val body = resp.body?.string() ?: error("Empty catalog")
-                if (!resp.isSuccessful) error("Catalog ${resp.code}: $body")
-                parseIndex(body)
+            val primary = runCatching { download(indexUrl) }.getOrNull()
+            val fromIndex = primary?.let { parseIndex(it) }.orEmpty()
+            if (fromIndex.size >= 50) return@withContext fromIndex
+
+            // Fallback / merge multipartite catalogs
+            val merged = linkedMapOf<String, SourceDescriptor>()
+            fromIndex.forEach { merged[it.id] = it }
+            for (url in PARTS) {
+                runCatching { parseIndex(download(url)) }.getOrNull()?.forEach { merged[it.id] = it }
             }
+            if (merged.isEmpty()) error("Empty catalog from $indexUrl")
+            merged.values.toList()
         }
+
+    private fun download(url: String): String {
+        val req = Request.Builder().url(url).get().build()
+        client.newCall(req).execute().use { resp ->
+            val body = resp.body?.string() ?: error("Empty catalog")
+            if (!resp.isSuccessful) error("Catalog ${resp.code}: ${body.take(200)}")
+            return body
+        }
+    }
 
     fun parseIndex(json: String): List<SourceDescriptor> {
         val root = JSONObject(json)
