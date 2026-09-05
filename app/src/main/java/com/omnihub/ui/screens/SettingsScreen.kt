@@ -31,7 +31,8 @@ fun SettingsScreen(
     onBack: () -> Unit,
     onOpenConnectors: () -> Unit,
     onOpenLegal: (LegalDoc) -> Unit,
-    onOpenAnalytics: () -> Unit = {}
+    onOpenAnalytics: () -> Unit = {},
+    onOpenStore: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val app = context.applicationContext as OmniHubApp
@@ -73,6 +74,13 @@ fun SettingsScreen(
                 leadingContent = { Icon(Icons.Default.Analytics, null) },
                 trailingContent = { Icon(Icons.Default.ChevronRight, null) },
                 modifier = Modifier.clickable { onOpenAnalytics() }
+            )
+            ListItem(
+                headlineContent = { Text("Omni Store") },
+                supportingContent = { Text("Install API, Web, and MCP sources from OmniHub-Sources") },
+                leadingContent = { Icon(Icons.Default.Store, null) },
+                trailingContent = { Icon(Icons.Default.ChevronRight, null) },
+                modifier = Modifier.clickable { onOpenStore() }
             )
 
             Divider(Modifier.padding(vertical = 8.dp))
