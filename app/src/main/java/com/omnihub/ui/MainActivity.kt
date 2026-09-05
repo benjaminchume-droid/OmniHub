@@ -67,7 +67,8 @@ fun OmniHubNav() {
             SettingsScreen(
                 onBack = { navController.popBackStack() },
                 onOpenConnectors = { navController.navigate("connectors") },
-                onOpenLegal = { doc -> navController.navigate("legal/${doc.name}") }
+                onOpenLegal = { doc -> navController.navigate("legal/${doc.name}") },
+                onOpenAnalytics = { navController.navigate("analytics") }
             )
         }
         composable("customize") { CustomizeScreen(onBack = { navController.popBackStack() }) }
@@ -75,6 +76,7 @@ fun OmniHubNav() {
         composable("skills") { SkillsScreen(onBack = { navController.popBackStack() }) }
         composable("projects") { ProjectsScreen(onBack = { navController.popBackStack() }) }
         composable("sources") { SourcesScreen(onBack = { navController.popBackStack() }) }
+        composable("analytics") { AnalyticsScreen(onBack = { navController.popBackStack() }) }
         composable("legal/{doc}", arguments = listOf(navArgument("doc") { type = NavType.StringType })) { entry ->
             val doc = LegalDoc.valueOf(entry.arguments?.getString("doc") ?: LegalDoc.PRIVACY.name)
             LegalScreen(doc = doc, onBack = { navController.popBackStack() })
