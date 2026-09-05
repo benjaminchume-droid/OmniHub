@@ -1,7 +1,6 @@
 package com.omnihub.source.builtin
 
 import android.content.Context
-import com.omnihub.R
 import com.omnihub.providers.ChatRequest
 import com.omnihub.providers.ChatResponse
 import com.omnihub.providers.ModelInfo
@@ -15,7 +14,7 @@ class OpenAiSource(private val context: Context) : AiSource {
     override val id = "openai"
     override val name = "ChatGPT"
     override val description = "OpenAI's GPT models via API"
-    override val icon = R.drawable.ic_openai
+    override val icon = -1  // System will use provider name for emoji/icon
     override val type = SourceType.API
     override val authType = AuthType.API_KEY
     override val version = "1.2.0"

@@ -1,7 +1,6 @@
 package com.omnihub.source.builtin
 
 import android.content.Context
-import com.omnihub.R
 import com.omnihub.providers.ChatRequest
 import com.omnihub.providers.ChatResponse
 import com.omnihub.providers.ModelInfo
@@ -15,7 +14,7 @@ class GeminiSource(private val context: Context) : AiSource {
     override val id = "gemini"
     override val name = "Gemini"
     override val description = "Google's Gemini models via API"
-    override val icon = R.drawable.ic_gemini
+    override val icon = -1
     override val type = SourceType.API
     override val authType = AuthType.API_KEY
     override val version = "1.0.0"

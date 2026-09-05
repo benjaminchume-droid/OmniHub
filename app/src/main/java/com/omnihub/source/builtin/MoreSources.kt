@@ -1,7 +1,6 @@
 package com.omnihub.source.builtin
 
 import android.content.Context
-import com.omnihub.R
 import com.omnihub.providers.ChatRequest
 import com.omnihub.providers.ChatResponse
 import com.omnihub.providers.ModelInfo
@@ -11,12 +10,11 @@ import com.omnihub.source.SourceType
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.emptyFlow
 
-// Groq - Ultra-fast inference
 class GroqSource(private val context: Context) : AiSource {
     override val id = "groq"
     override val name = "Groq"
     override val description = "Lightning-fast LPU inference"
-    override val icon = R.drawable.ic_groq
+    override val icon = -1
     override val type = SourceType.API
     override val authType = AuthType.API_KEY
     override val version = "1.0.0"
@@ -39,12 +37,11 @@ class GroqSource(private val context: Context) : AiSource {
     override fun getReliabilityScore(): Double = 0.95
 }
 
-// DeepSeek
 class DeepSeekSource(private val context: Context) : AiSource {
     override val id = "deepseek"
     override val name = "DeepSeek"
     override val description = "Cost-effective reasoning models"
-    override val icon = R.drawable.ic_deepseek
+    override val icon = -1
     override val type = SourceType.API
     override val authType = AuthType.API_KEY
     override val version = "1.0.0"
@@ -65,12 +62,11 @@ class DeepSeekSource(private val context: Context) : AiSource {
     override fun getReliabilityScore(): Double = 0.96
 }
 
-// Mistral
 class MistralSource(private val context: Context) : AiSource {
     override val id = "mistral"
     override val name = "Mistral"
     override val description = "Open and optimal LLMs"
-    override val icon = R.drawable.ic_mistral
+    override val icon = -1
     override val type = SourceType.API
     override val authType = AuthType.API_KEY
     override val version = "1.0.0"
@@ -92,12 +88,11 @@ class MistralSource(private val context: Context) : AiSource {
     override fun getReliabilityScore(): Double = 0.97
 }
 
-// Perplexity
 class PerplexitySource(private val context: Context) : AiSource {
     override val id = "perplexity"
     override val name = "Perplexity"
     override val description = "AI-powered search and reasoning"
-    override val icon = R.drawable.ic_perplexity
+    override val icon = -1
     override val type = SourceType.API
     override val authType = AuthType.API_KEY
     override val version = "1.0.0"

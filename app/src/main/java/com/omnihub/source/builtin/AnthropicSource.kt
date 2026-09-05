@@ -1,7 +1,6 @@
 package com.omnihub.source.builtin
 
 import android.content.Context
-import com.omnihub.R
 import com.omnihub.providers.ChatRequest
 import com.omnihub.providers.ChatResponse
 import com.omnihub.providers.ModelInfo
@@ -15,7 +14,7 @@ class AnthropicSource(private val context: Context) : AiSource {
     override val id = "anthropic"
     override val name = "Claude"
     override val description = "Anthropic's Claude models via API"
-    override val icon = R.drawable.ic_anthropic
+    override val icon = -1
     override val type = SourceType.API
     override val authType = AuthType.API_KEY
     override val version = "1.1.0"
