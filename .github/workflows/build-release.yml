@@ -32,18 +32,20 @@ jobs:
       - name: Restore Gradle Wrapper
         run: |
           set -e
-          chmod +x gradlew || true
           mkdir -p gradle/wrapper
-          if [ ! -f gradle/wrapper/gradle-wrapper.jar ] || [ $(wc -c < gradle/wrapper/gradle-wrapper.jar) -lt 20000 ]; then
-            echo "Downloading official gradle-wrapper.jar"
-            curl -fsSL -o gradle/wrapper/gradle-wrapper.jar \
-              "https://raw.githubusercontent.com/gradle/gradle/v8.7.0/gradle/wrapper/gradle-wrapper.jar"
-          fi
-          if [ ! -f gradlew ] || [ $(wc -c < gradlew) -lt 5000 ]; then
-            echo "Downloading official gradlew"
-            curl -fsSL -o gradlew "https://raw.githubusercontent.com/gradle/gradle/v8.7.0/gradlew"
-            chmod +x gradlew
-          fi
+          curl -fsSL -o gradle/wrapper/gradle-wrapper.jar \
+            "https://raw.githubusercontent.com/gradle/gradle/v8.7.0/gradle/wrapper/gradle-wrapper.jar"
+          curl -fsSL -o gradlew "https://raw.githubusercontent.com/gradle/gradle/v8.7.0/gradlew"
+          chmod +x gradlew
+          cat > gradle/wrapper/gradle-wrapper.properties << 'PROP'
+distributionBase=GRADLE_USER_HOME
+distributionPath=wrapper/dists
+distributionUrl=https\://services.gradle.org/distributions/gradle-8.7-bin.zip
+networkTimeout=10000
+validateDistributionUrl=true
+zipStoreBase=GRADLE_USER_HOME
+zipStorePath=wrapper/dists
+PROP
           ls -la gradlew gradle/wrapper/
           wc -c gradlew gradle/wrapper/gradle-wrapper.jar
 
@@ -60,7 +62,6 @@ jobs:
               echo "keyAlias=${{ secrets.KEY_ALIAS }}"
               echo "keyPassword=${{ secrets.KEY_PASSWORD }}"
             } > keystore.properties
-            ls -la keystore.jks
           elif [ -n "$KEYSTORE" ]; then
             echo "$KEYSTORE" | base64 --decode > keystore.jks
             {
@@ -76,43 +77,56 @@ jobs:
       - name: Build Release APK
         id: build
         run: |
-          set -euo pipefail
+          set -o pipefail
           ./gradlew --version
+          set +e
           ./gradlew clean assembleRelease --stacktrace 2>&1 | tee build.log
+          STATUS=${PIPESTATUS[0]}
+          set -e
+          echo "---- Gradle exit: $STATUS ----"
+          echo "---- Kotlin/Java errors ----"
+          grep -E "^e: |error:|e: file://|Unresolved reference|is not abstract|Conflicting|Overload resolution" build.log | tail -120 || true
           echo "---- APK search ----"
-          find app/build/outputs -type f -name "*.apk" -exec ls -lah {} \; || true
-          APK=$(find app/build/outputs/apk -type f -name "*.apk" | head -n 1 || true)
+          find app/build/outputs -type f \( -name "*.apk" -o -name "*.aab" \) -exec ls -lah {} \; || true
+          APK=$(find app/build/outputs/apk -type f -name "*.apk" 2>/dev/null | head -n 1 || true)
           if [ -z "$APK" ] || [ ! -f "$APK" ]; then
-            echo "FATAL: No APK produced"
-            grep -E "^e: |error:|FAILED|Unresolved reference" build.log | tail -100 || true
+            echo "FATAL: No APK produced (gradle status=$STATUS)"
             exit 1
           fi
           SIZE=$(wc -c < "$APK")
           echo "APK=$APK size=$SIZE"
           if [ "$SIZE" -lt 500000 ]; then
-            echo "FATAL: APK too small ($SIZE bytes) — not a real package"
+            echo "FATAL: APK too small ($SIZE bytes)"
             exit 1
           fi
-          echo "apk_path=$APK" >> "$GITHUB_OUTPUT"
-          echo "apk_size=$SIZE" >> "$GITHUB_OUTPUT"
           cp "$APK" "./OmniHub-v1.0.2.apk"
           ls -lah ./OmniHub-v1.0.2.apk
+          exit $STATUS
         env:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
 
+      - name: Upload build log (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+          if-no-files-found: warn
+
       - name: Upload APK artifact
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: OmniHub-1.0.2-apk
           path: |
             OmniHub-v1.0.2.apk
             app/build/outputs/apk/**/*.apk
-            build.log
           if-no-files-found: error
 
       - name: Create GitHub Release
+        if: success()
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v1.0.2
