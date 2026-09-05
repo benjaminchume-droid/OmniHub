@@ -3,6 +3,7 @@ package com.omnihub.source
 import android.content.Context
 import com.omnihub.data.SecureStore
 import com.omnihub.providers.ChatResponse
+import com.omnihub.providers.ModelInfo
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -29,29 +30,28 @@ class DescriptorSource(
         kind = when (descriptor.kind.uppercase()) {
             "WEB_SESSION", "WEB" -> SourceKind.WEB_SESSION
             "HYBRID" -> SourceKind.HYBRID
+            "MCP" -> SourceKind.MCP
             else -> SourceKind.API
         },
         authType = when (descriptor.authType.uppercase()) {
-            "WEB_LOGIN" -> AuthType.WEB_LOGIN
-            "BOTH" -> AuthType.BOTH
+            "WEB_SESSION", "WEB_LOGIN" -> AuthType.WEB_SESSION
+            "OAUTH", "OAUTH2" -> AuthType.OAUTH2
             "NONE" -> AuthType.NONE
             else -> AuthType.API_KEY
         },
-        version = descriptor.version,
         description = descriptor.description,
         websiteUrl = descriptor.websiteUrl,
+        revision = descriptor.revision.ifBlank { descriptor.version.toString() },
         bundled = false
     )
+
+    override val models: List<ModelInfo> =
+        descriptor.models.map { ModelInfo(it, it) }
 
     override fun isConfigured(): Boolean {
         val key = SecureStore.getApiKey(context, descriptor.id)
         val session = SecureStore.getSession(context, descriptor.id)
         return !key.isNullOrBlank() || !session.isNullOrBlank()
-    }
-
-    override suspend fun configure(config: SourceConfig) {
-        config.apiKey?.let { SecureStore.setApiKey(context, descriptor.id, it) }
-        config.sessionCookies?.let { SecureStore.setSession(context, descriptor.id, it) }
     }
 
     override suspend fun chat(request: SourceChatRequest): ChatResponse = withContext(Dispatchers.IO) {
