@@ -11,15 +11,31 @@ import kotlinx.coroutines.flow.asStateFlow
 class SourceManager(private val context: Context) {
     private val _sources = MutableStateFlow<List<AiSource>>(emptyList())
     val sources: StateFlow<List<AiSource>> = _sources.asStateFlow()
+    private val installedDescriptors = mutableListOf<AiSource>()
 
     init { reload() }
 
-    fun reload() { _sources.value = buildBundled() }
+    fun reload() {
+        _sources.value = buildBundled() + installedDescriptors.toList()
+    }
+
     fun all(): List<AiSource> = _sources.value
     fun get(id: String): AiSource? = _sources.value.find { it.info.id == id }
     fun configured(): List<AiSource> = _sources.value.filter { it.isConfigured() }
     fun healthy(): List<AiSource> =
         _sources.value.filter { it.health() == SourceHealth.HEALTHY && it.isConfigured() }
+
+    /** Phase-2 catalog install: register a DescriptorSource from remote index. */
+    fun installDescriptor(descriptor: SourceDescriptor) {
+        installedDescriptors.removeAll { it.info.id == descriptor.id }
+        installedDescriptors.add(DescriptorSource(context, descriptor))
+        reload()
+    }
+
+    fun uninstall(id: String) {
+        installedDescriptors.removeAll { it.info.id == id }
+        reload()
+    }
 
     private fun buildBundled(): List<AiSource> = listOf(
         api("openai", "ChatGPT", "https://api.openai.com/v1",
