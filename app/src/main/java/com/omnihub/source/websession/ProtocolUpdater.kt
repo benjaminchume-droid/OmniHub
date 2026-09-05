@@ -1,35 +1,32 @@
 package com.omnihub.source.websession
 
-import android.content.Context
-import android.util.Log
-import com.omnihub.source.SourceManager
+import com.omnihub.source.SourceCatalog
+import com.omnihub.source.SourceDescriptor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
-class ProtocolUpdater(private val sourceManager: SourceManager) {
-    
-    suspend fun checkForProtocolUpdates(catalogUrl: String): List<ProtocolUpdate> = withContext(Dispatchers.IO) {
-        Log.d(TAG, "Checking for protocol updates")
-        // TODO: Fetch catalog
-        // TODO: Compare local vs remote protocol versions
-        // TODO: Return list of available updates
-        return@withContext emptyList()
-    }
-    
-    suspend fun applyProtocolUpdate(sourceId: String, newVersion: String) = withContext(Dispatchers.IO) {
-        Log.d(TAG, "Applying protocol update for $sourceId to version $newVersion")
-        // TODO: Download new protocol
-        // TODO: Hot-reload without restart
-    }
-    
-    companion object {
-        private const val TAG = "ProtocolUpdater"
-    }
-}
-
 data class ProtocolUpdate(
     val sourceId: String,
-    val currentVersion: String,
-    val newVersion: String,
+    val currentRevision: String,
+    val newRevision: String,
     val changelog: String = ""
 )
+
+class ProtocolUpdater {
+    suspend fun checkUpdates(
+        installed: Map<String, String>,
+        catalogUrl: String? = null
+    ): List<ProtocolUpdate> = withContext(Dispatchers.IO) {
+        val catalog: List<SourceDescriptor> = try {
+            SourceCatalog.fetch(catalogUrl ?: SourceCatalog.DEFAULT_INDEX)
+        } catch (_: Exception) {
+            emptyList()
+        }
+        catalog.mapNotNull { d ->
+            val current = installed[d.id] ?: return@mapNotNull null
+            if (d.revision != current) {
+                ProtocolUpdate(d.id, current, d.revision, "Catalog revision changed")
+            } else null
+        }
+    }
+}
