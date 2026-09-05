@@ -4,8 +4,10 @@ import android.content.Context
 import android.util.Log
 
 class AutoIssueReporter(private val context: Context) {
-
     private val prefs = context.getSharedPreferences("omni_source_failures", 0)
+
+    fun report(sourceId: String, message: String) =
+        reportFailure(sourceId, sourceId, message)
 
     fun reportFailure(sourceId: String, sourceName: String, error: String) {
         val key = "fail_$sourceId"
@@ -39,23 +41,5 @@ class AutoIssueReporter(private val context: Context) {
             .remove("ts_$sourceId")
             .remove("name_$sourceId")
             .apply()
-    }
-
-    fun githubIssueUrl(sourceId: String, sourceName: String): String {
-        val err = lastError(sourceId) ?: "unknown"
-        val title = java.net.URLEncoder.encode("[source] $sourceName failure", "UTF-8")
-        val body = java.net.URLEncoder.encode(
-            """
-            ## Source failure auto-report
-            - **Source:** $sourceName (`$sourceId`)
-            - **Error:** `$err`
-            - **Count:** ${failureCount(sourceId)}
-            - **App:** OmniHub
-
-            Auto-generated when routing failed on this source.
-            """.trimIndent(),
-            "UTF-8"
-        )
-        return "https://github.com/benjaminchume-droid/OmniHub/issues/new?title=$title&body=$body"
     }
 }
