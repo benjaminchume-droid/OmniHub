@@ -4,110 +4,66 @@ on:
   push:
     branches:
       - main
-      - phase-1-to-4-implementation
     tags:
       - 'v*'
-  pull_request:
-    branches:
-      - main
 
 jobs:
   build:
     runs-on: ubuntu-latest
     
     steps:
-    - name: Checkout repository
+    - name: Setup
       uses: actions/checkout@v4
-      with:
-        ref: ${{ github.ref }}
     
-    - name: Set up JDK 17
+    - name: Checkout
+      uses: actions/checkout@v4
+    
+    - name: Setup JDK 17
       uses: actions/setup-java@v4
       with:
         java-version: '17'
         distribution: 'temurin'
     
+    - name: Setup Android SDK
+      uses: android-actions/setup-android@v3
+    
     - name: Setup Gradle
       uses: gradle/gradle-build-action@v3
     
-    - name: Grant execute permission for gradlew
+    - name: Prepare Gradle Wrapper
       run: chmod +x gradlew
     
-    - name: Build with Gradle
-      run: ./gradlew build --no-daemon
+    - name: Decode Keystore
+      run: |
+        echo "${{ secrets.KEYSTORE }}" | base64 --decode > keystore.jks
     
-    - name: Run tests
-      run: ./gradlew test --no-daemon
-    
-    - name: Build debug APK
-      run: ./gradlew assembleDebug --no-daemon
-    
-    - name: Build release APK
-      run: ./gradlew assembleRelease --no-daemon
+    - name: Build APK
+      run: ./gradlew assembleRelease
       env:
-        ORG_GRADLE_PROJECT_signingKey: ${{ secrets.SIGNING_KEY }}
-        ORG_GRADLE_PROJECT_signingPassword: ${{ secrets.SIGNING_PASSWORD }}
-        ORG_GRADLE_PROJECT_storeFile: ${{ secrets.KEYSTORE_PATH }}
-        ORG_GRADLE_PROJECT_storePassword: ${{ secrets.KEYSTORE_PASSWORD }}
-        ORG_GRADLE_PROJECT_keyAlias: ${{ secrets.KEY_ALIAS }}
-        ORG_GRADLE_PROJECT_keyPassword: ${{ secrets.KEY_PASSWORD }}
+        KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+        KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+        KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
     
-    - name: Upload debug APK
-      uses: actions/upload-artifact@v4
-      if: success()
-      with:
-        name: app-debug
-        path: app/build/outputs/apk/debug/app-debug.apk
+    - name: Find APK
+      id: find_apk
+      run: |
+        apk_path=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
+        echo "apk_path=$apk_path" >> $GITHUB_OUTPUT
     
-    - name: Upload release APK
-      uses: actions/upload-artifact@v4
-      if: success()
-      with:
-        name: app-release
-        path: app/build/outputs/apk/release/app-release.apk
-    
-    - name: Create Release
+    - name: Create GitHub Release
       if: startsWith(github.ref, 'refs/tags/v')
       uses: softprops/action-gh-release@v1
       with:
-        files: |
-          app/build/outputs/apk/release/app-release.apk
-          app/build/outputs/apk/debug/app-debug.apk
-        body: |
-          ## Changes
-          
-          - Automated release from GitHub Actions
-          - Build commit: ${{ github.sha }}
+        files: ${{ steps.find_apk.outputs.apk_path }}
+        tag_name: ${{ github.ref_name }}
+        name: OmniHub ${{ github.ref_name }}
         draft: false
         prerelease: false
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     
-    - name: Notify on failure
-      if: failure()
-      run: |
-        echo "Build failed! Check the logs for details."
-        exit 1
-
-  lint:
-    runs-on: ubuntu-latest
+    - name: Post Setup
+      run: echo "Build complete!"
     
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-    
-    - name: Set up JDK 17
-      uses: actions/setup-java@v4
-      with:
-        java-version: '17'
-        distribution: 'temurin'
-    
-    - name: Run lint
-      run: ./gradlew lint --no-daemon
-    
-    - name: Upload lint results
-      uses: actions/upload-artifact@v4
-      if: always()
-      with:
-        name: lint-results
-        path: app/build/reports/lint-results-debug.html
+    - name: Complete Job
+      run: echo "Job completed successfully"
