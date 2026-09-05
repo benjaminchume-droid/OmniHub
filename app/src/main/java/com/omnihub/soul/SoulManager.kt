@@ -78,6 +78,8 @@ class SoulManager(context: Context) {
 
     fun unitCount(): Int = synchronized(soulUnits) { soulUnits.size }
 
+    fun loadUnits(): List<SoulUnit> = synchronized(soulUnits) { soulUnits.toList() }
+
     private fun load() {
         try {
             if (unitsFile.exists()) {
