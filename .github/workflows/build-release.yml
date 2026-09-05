@@ -33,19 +33,18 @@ jobs:
         run: |
           set -e
           mkdir -p gradle/wrapper
-          curl -fsSL -o gradle/wrapper/gradle-wrapper.jar \
-            "https://raw.githubusercontent.com/gradle/gradle/v8.7.0/gradle/wrapper/gradle-wrapper.jar"
+          curl -fsSL -o gradle/wrapper/gradle-wrapper.jar "https://raw.githubusercontent.com/gradle/gradle/v8.7.0/gradle/wrapper/gradle-wrapper.jar"
           curl -fsSL -o gradlew "https://raw.githubusercontent.com/gradle/gradle/v8.7.0/gradlew"
           chmod +x gradlew
-          cat > gradle/wrapper/gradle-wrapper.properties << 'PROP'
-distributionBase=GRADLE_USER_HOME
-distributionPath=wrapper/dists
-distributionUrl=https\://services.gradle.org/distributions/gradle-8.7-bin.zip
-networkTimeout=10000
-validateDistributionUrl=true
-zipStoreBase=GRADLE_USER_HOME
-zipStorePath=wrapper/dists
-PROP
+          printf '%s\n' \
+            'distributionBase=GRADLE_USER_HOME' \
+            'distributionPath=wrapper/dists' \
+            'distributionUrl=https\://services.gradle.org/distributions/gradle-8.7-bin.zip' \
+            'networkTimeout=10000' \
+            'validateDistributionUrl=true' \
+            'zipStoreBase=GRADLE_USER_HOME' \
+            'zipStorePath=wrapper/dists' \
+            > gradle/wrapper/gradle-wrapper.properties
           ls -la gradlew gradle/wrapper/
           wc -c gradlew gradle/wrapper/gradle-wrapper.jar
 
@@ -56,20 +55,16 @@ PROP
         run: |
           if [ -n "$KEYSTORE_BASE64" ]; then
             echo "$KEYSTORE_BASE64" | base64 --decode > keystore.jks
-            {
-              echo "storeFile=keystore.jks"
-              echo "storePassword=${{ secrets.KEYSTORE_PASSWORD }}"
-              echo "keyAlias=${{ secrets.KEY_ALIAS }}"
-              echo "keyPassword=${{ secrets.KEY_PASSWORD }}"
-            } > keystore.properties
+            echo "storeFile=keystore.jks" > keystore.properties
+            echo "storePassword=${{ secrets.KEYSTORE_PASSWORD }}" >> keystore.properties
+            echo "keyAlias=${{ secrets.KEY_ALIAS }}" >> keystore.properties
+            echo "keyPassword=${{ secrets.KEY_PASSWORD }}" >> keystore.properties
           elif [ -n "$KEYSTORE" ]; then
             echo "$KEYSTORE" | base64 --decode > keystore.jks
-            {
-              echo "storeFile=keystore.jks"
-              echo "storePassword=${{ secrets.KEYSTORE_PASSWORD }}"
-              echo "keyAlias=${{ secrets.KEY_ALIAS }}"
-              echo "keyPassword=${{ secrets.KEY_PASSWORD }}"
-            } > keystore.properties
+            echo "storeFile=keystore.jks" > keystore.properties
+            echo "storePassword=${{ secrets.KEYSTORE_PASSWORD }}" >> keystore.properties
+            echo "keyAlias=${{ secrets.KEY_ALIAS }}" >> keystore.properties
+            echo "keyPassword=${{ secrets.KEY_PASSWORD }}" >> keystore.properties
           else
             echo "WARNING: No keystore — unsigned release APK"
           fi
@@ -84,10 +79,10 @@ PROP
           STATUS=${PIPESTATUS[0]}
           set -e
           echo "---- Gradle exit: $STATUS ----"
-          echo "---- Kotlin/Java errors ----"
-          grep -E "^e: |error:|e: file://|Unresolved reference|is not abstract|Conflicting|Overload resolution" build.log | tail -120 || true
+          echo "---- Errors ----"
+          grep -E "^e: |Unresolved reference|is not abstract|Conflicting overloads|error:" build.log | tail -120 || true
           echo "---- APK search ----"
-          find app/build/outputs -type f \( -name "*.apk" -o -name "*.aab" \) -exec ls -lah {} \; || true
+          find app/build/outputs -type f -name "*.apk" -exec ls -lah {} \; || true
           APK=$(find app/build/outputs/apk -type f -name "*.apk" 2>/dev/null | head -n 1 || true)
           if [ -z "$APK" ] || [ ! -f "$APK" ]; then
             echo "FATAL: No APK produced (gradle status=$STATUS)"
@@ -120,9 +115,7 @@ PROP
         uses: actions/upload-artifact@v4
         with:
           name: OmniHub-1.0.2-apk
-          path: |
-            OmniHub-v1.0.2.apk
-            app/build/outputs/apk/**/*.apk
+          path: OmniHub-v1.0.2.apk
           if-no-files-found: error
 
       - name: Create GitHub Release
