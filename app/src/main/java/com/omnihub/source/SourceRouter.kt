@@ -1,10 +1,12 @@
 package com.omnihub.source
 
+import com.omnihub.OmniHubApp
 import com.omnihub.providers.ChatMessage
 import com.omnihub.providers.ChatResponse
 import com.omnihub.soul.SoulManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.util.UUID
 
 class SourceRouter(
     private val sourceManager: SourceManager,
@@ -27,11 +29,19 @@ class SourceRouter(
         val candidates = rank(preferredSourceId, taskHints)
         if (candidates.isEmpty()) {
             throw IllegalStateException(
-                "No configured Sources. Open Sources and add an API key for ChatGPT / Claude / Gemini / DeepSeek / \u2026"
+                "No configured Sources. Open Sources and add an API key for ChatGPT / Claude / Gemini / DeepSeek / …"
             )
         }
+
+        val analytics = try { OmniHubApp.instance.analytics } catch (_: Exception) { null }
+        val requestId = UUID.randomUUID().toString()
+        val started = System.currentTimeMillis()
+        val userText = messages.lastOrNull { it.role == "user" }?.content.orEmpty()
+        analytics?.recordUserMessage(conversationId, userText)
+
         var last: Exception? = null
         for (src in candidates) {
+            analytics?.recordRequestStart(requestId, conversationId, src.info.id, null)
             try {
                 val resp = src.chat(
                     SourceChatRequest(
@@ -41,14 +51,60 @@ class SourceRouter(
                         conversationId = conversationId
                     )
                 )
+                val duration = System.currentTimeMillis() - started
+                val tokens = resp.usageTokens
+                val estimated = tokens <= 0
+                val total = if (tokens > 0) tokens else estimateTokens(userText, resp.content)
+                analytics?.recordRequestResult(
+                    requestId = requestId,
+                    conversationId = conversationId,
+                    sourceId = src.info.id,
+                    modelId = resp.model,
+                    durationMs = duration,
+                    success = true,
+                    timedOut = false,
+                    inputTokens = if (estimated) total / 3 else 0,
+                    outputTokens = if (estimated) total - total / 3 else tokens,
+                    totalTokens = total,
+                    tokensEstimated = estimated
+                )
                 soul.learnFromExchange(src.info.id, messages, resp.content, conversationId)
                 return@withContext RouteResult(resp, src.info.id, src.info.name)
             } catch (e: Exception) {
                 last = e
+                val duration = System.currentTimeMillis() - started
+                val timedOut = e.message?.contains("timeout", ignoreCase = true) == true ||
+                    e.message?.contains("timed out", ignoreCase = true) == true
+                val cat = when {
+                    timedOut -> "timeout"
+                    e.message?.contains("401") == true || e.message?.contains("auth", true) == true -> "authentication"
+                    e.message?.contains("429") == true -> "rate_limit"
+                    e.message?.contains("network", true) == true || e is java.io.IOException -> "network"
+                    else -> "provider"
+                }
+                analytics?.recordRequestResult(
+                    requestId = requestId,
+                    conversationId = conversationId,
+                    sourceId = src.info.id,
+                    modelId = null,
+                    durationMs = duration,
+                    success = false,
+                    timedOut = timedOut,
+                    inputTokens = 0,
+                    outputTokens = 0,
+                    totalTokens = 0,
+                    tokensEstimated = false,
+                    errorCategory = cat
+                )
                 issueReporter.report(src.info.id, e.message ?: "route failure")
             }
         }
         throw last ?: IllegalStateException("All Sources failed")
+    }
+
+    private fun estimateTokens(user: String, assistant: String): Int {
+        val chars = user.length + assistant.length
+        return (chars / 4).coerceAtLeast(1)
     }
 
     private fun rank(preferred: String?, hints: TaskHints): List<AiSource> {
