@@ -2,202 +2,154 @@ package com.omnihub.soul
 
 import android.content.Context
 import android.util.Log
-import com.google.gson.Gson
-import com.omnihub.providers.ChatRequest
-import com.omnihub.providers.ChatResponse
+import com.omnihub.providers.ChatMessage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
 import java.io.File
-import java.util.*
+import java.util.UUID
 
-/**
- * Manages persistent memory (soul) system.
- * Compresses conversations into reusable facts across all providers.
- */
-class SoulManager(private val context: Context) {
-    private val gson = Gson()
+class SoulManager(context: Context) {
+    private val TAG = "SoulManager"
+    private val root = File(context.filesDir, "Omni/memory").also { it.mkdirs() }
+    private val soulFile = File(root, "soul.md")
+    private val unitsFile = File(root, "units.json")
     private val soulUnits = mutableListOf<SoulUnit>()
-    private var storagePath: String = "/storage/OmniHub/soul"  // User-configurable
-    private val soulFile: File
-        get() = File(storagePath, "memory.md")
 
-    init {
-        // Create storage directory if needed
-        File(storagePath).mkdirs()
-        loadSoulFromDisk()
-    }
+    init { load() }
 
-    /**
-     * Set user-configured storage path (from app settings)
-     */
     fun setStoragePath(path: String) {
-        storagePath = path
-        File(storagePath).mkdirs()
-        Log.d(TAG, "Soul storage path set to: $path")
+        Log.d(TAG, "Custom storage path requested: $path")
     }
 
-    /**
-     * Extract soul units from a conversation
-     */
+    suspend fun learnFromExchange(
+        sourceId: String,
+        messages: List<ChatMessage>,
+        assistantReply: String,
+        conversationId: String?
+    ) = withContext(Dispatchers.Default) {
+        val convId = conversationId ?: UUID.randomUUID().toString()
+        val userText = messages.lastOrNull { it.role == "user" }?.content.orEmpty()
+        val topic = extractTopic(userText.ifBlank { assistantReply })
+        val unit = SoulUnit(
+            id = "soul-${UUID.randomUUID()}",
+            type = SoulType.CONVERSATION,
+            content = "User: ${userText.take(300)}\nAssistant: ${assistantReply.take(400)}",
+            sourceId = sourceId,
+            conversationId = convId,
+            topic = topic,
+            summary = assistantReply.take(400),
+            keyFacts = extractFacts(userText + "\n" + assistantReply),
+            tags = extractTags(userText + " " + assistantReply),
+            importance = 0.6,
+            policy = SoulPolicy.LONG_TERM
+        )
+        synchronized(soulUnits) {
+            soulUnits.add(unit)
+            if (soulUnits.size > 200) {
+                soulUnits.sortByDescending { it.importance * it.createdAt }
+                while (soulUnits.size > 150) soulUnits.removeAt(soulUnits.lastIndex)
+            }
+            persist()
+        }
+    }
+
     suspend fun learnFromConversation(
         sourceId: String,
-        request: ChatRequest,
-        response: ChatResponse
-    ) = withContext(Dispatchers.Default) {
-        Log.d(TAG, "Learning from conversation with $sourceId")
-        val conversationId = request.conversationId ?: UUID.randomUUID().toString()
-        
-        // Simple extraction: merge assistant response into a single unit
-        // TODO: Phase 2 - Add NLP for entity extraction & fact discovery
-        val newUnit = SoulUnit(
-            id = "soul-${UUID.randomUUID()}",
-            timestamp = System.currentTimeMillis(),
-            sourceId = sourceId,
-            conversationId = conversationId,
-            topic = extractTopic(request.messages),
-            summary = response.message.take(500),  // First 500 chars
-            keyFacts = extractFacts(request.messages + response.message),
-            topicTags = extractTags(request.messages + response.message),
-            compressed = compress(response.message),
-            importance = 1.0
-        )
-        
-        synchronized(soulUnits) {
-            soulUnits.add(newUnit)
-            deduplicateUnits()
-            persistSoulToDisk()
-        }
+        request: com.omnihub.providers.ChatRequest,
+        response: com.omnihub.providers.ChatResponse
+    ) {
+        learnFromExchange(sourceId, request.messages, response.content, null)
     }
 
-    /**
-     * Generate prompt context from recent soul units
-     */
     suspend fun generatePromptContext(maxUnits: Int = 5): String = withContext(Dispatchers.Default) {
         synchronized(soulUnits) {
-            val recent = soulUnits.sortedByDescending { it.timestamp }.take(maxUnits)
+            val recent = soulUnits.sortedByDescending { it.importance * it.createdAt }.take(maxUnits)
             if (recent.isEmpty()) return@withContext ""
-            
-            val context = StringBuilder()
-            context.append("## User Context (from memory):\n")
-            recent.forEach { unit ->
-                context.append("- **${unit.topic}**: ${unit.summary}\n")
-                context.append("  Tags: ${unit.topicTags.joinToString(" ")}\n\n")
-            }
-            context.toString()
-        }
-    }
-
-    /**
-     * Load soul from memory.md file
-     */
-    private suspend fun loadSoulFromDisk() = withContext(Dispatchers.IO) {
-        if (!soulFile.exists()) {
-            Log.d(TAG, "No existing soul found")
-            return@withContext
-        }
-        
-        try {
-            val content = soulFile.readText()
-            // Parse markdown and extract units
-            val units = parseMarkdownUnits(content)
-            synchronized(soulUnits) {
-                soulUnits.clear()
-                soulUnits.addAll(units)
-            }
-            Log.d(TAG, "Loaded ${units.size} soul units from disk")
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to load soul", e)
-        }
-    }
-
-    /**
-     * Persist soul to memory.md
-     */
-    private suspend fun persistSoulToDisk() = withContext(Dispatchers.IO) {
-        try {
-            val markdown = generateMarkdown()
-            soulFile.writeText(markdown)
-            Log.d(TAG, "Persisted soul to ${soulFile.absolutePath}")
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to persist soul", e)
-        }
-    }
-
-    /**
-     * Remove duplicate/redundant units
-     */
-    private fun deduplicateUnits() {
-        // Simple similarity check: if summaries are similar, keep only newer one
-        val toRemove = mutableSetOf<String>()
-        for (i in soulUnits.indices) {
-            for (j in i + 1 until soulUnits.size) {
-                if (areSimilar(soulUnits[i], soulUnits[j])) {
-                    // Keep newer one
-                    if (soulUnits[i].timestamp < soulUnits[j].timestamp) {
-                        toRemove.add(soulUnits[i].id)
-                    } else {
-                        toRemove.add(soulUnits[j].id)
-                    }
+            buildString {
+                append("## Omni memory (relevant units only)\n")
+                recent.forEach { u ->
+                    append("- [${u.type}] ${u.topic.ifBlank { u.summary.take(40) }}: ${u.summary.take(180)}\n")
                 }
             }
         }
-        soulUnits.removeAll { it.id in toRemove }
     }
 
-    private fun areSimilar(a: SoulUnit, b: SoulUnit): Boolean {
-        // Simple heuristic: same topic tags = similar
-        val commonTags = a.topicTags.intersect(b.topicTags.toSet())
-        return commonTags.size >= 2
-    }
+    fun unitCount(): Int = synchronized(soulUnits) { soulUnits.size }
 
-    private fun generateMarkdown(): String {
-        val md = StringBuilder()
-        md.append("# OmniHub Soul\n")
-        md.append("**Generated**: ${Date()}\n")
-        md.append("**Version**: 1.0\n\n")
-        
-        synchronized(soulUnits) {
-            soulUnits.sortedByDescending { it.timestamp }.forEach { unit ->
-                md.append("## Memory: ${unit.topic}\n")
-                md.append("**Date**: ${Date(unit.timestamp)}\n")
-                md.append("**Provider**: ${unit.sourceId}\n")
-                md.append("**Tags**: ${unit.topicTags.joinToString(", ")}\n\n")
-                md.append("${unit.summary}\n\n")
+    private fun load() {
+        try {
+            if (unitsFile.exists()) {
+                val arr = JSONArray(unitsFile.readText())
+                for (i in 0 until arr.length()) {
+                    val o = arr.getJSONObject(i)
+                    soulUnits.add(
+                        SoulUnit(
+                            id = o.optString("id"),
+                            type = runCatching { SoulType.valueOf(o.optString("type", "CONVERSATION")) }.getOrDefault(SoulType.CONVERSATION),
+                            content = o.optString("content"),
+                            sourceId = o.optString("sourceId"),
+                            conversationId = o.optString("conversationId"),
+                            topic = o.optString("topic"),
+                            summary = o.optString("summary"),
+                            importance = o.optDouble("importance", 0.5),
+                            createdAt = o.optLong("createdAt", System.currentTimeMillis()),
+                            tags = o.optJSONArray("tags")?.let { a -> (0 until a.length()).map { a.getString(it) } } ?: emptyList()
+                        )
+                    )
+                }
             }
+        } catch (e: Exception) {
+            Log.w(TAG, "load failed: ${e.message}")
         }
-        
-        return md.toString()
     }
 
-    private fun parseMarkdownUnits(content: String): List<SoulUnit> {
-        // TODO: Implement markdown parser
-        return emptyList()
+    private fun persist() {
+        try {
+            val arr = JSONArray()
+            soulUnits.forEach { u ->
+                arr.put(
+                    JSONObject()
+                        .put("id", u.id)
+                        .put("type", u.type.name)
+                        .put("content", u.content)
+                        .put("sourceId", u.sourceId)
+                        .put("conversationId", u.conversationId)
+                        .put("topic", u.topic)
+                        .put("summary", u.summary)
+                        .put("importance", u.importance)
+                        .put("createdAt", u.createdAt)
+                        .put("tags", JSONArray(u.tags))
+                )
+            }
+            unitsFile.writeText(arr.toString())
+            val md = buildString {
+                append("# Omni Soul\n\n")
+                append("_Auto-generated memory projection. Runtime uses indexed units._\n\n")
+                soulUnits.sortedByDescending { it.createdAt }.take(40).forEach { u ->
+                    append("## ${u.topic.ifBlank { u.type.name }}\n")
+                    append("- source: ${u.sourceId}\n")
+                    append("- ${u.summary}\n\n")
+                }
+            }
+            soulFile.writeText(md)
+        } catch (e: Exception) {
+            Log.w(TAG, "persist failed: ${e.message}")
+        }
     }
 
-    private fun extractTopic(messages: List<Any>): String {
-        // Simple: use first user message
-        return messages.firstOrNull()?.toString()?.take(50) ?: "Unknown"
+    private fun extractTopic(text: String): String {
+        val t = text.lineSequence().firstOrNull { it.isNotBlank() }?.trim().orEmpty()
+        return t.take(60).ifBlank { "Conversation" }
     }
 
-    private fun extractFacts(content: String): List<String> {
-        // TODO: Phase 2 - NLP-based fact extraction
-        return content.split(".")
-            .map { it.trim() }
-            .filter { it.isNotEmpty() }
-            .take(3)
-    }
+    private fun extractFacts(text: String): List<String> =
+        text.lines().map { it.trim() }.filter { it.length in 20..160 }.take(5)
 
-    private fun extractTags(content: String): List<String> {
-        // TODO: Phase 2 - Semantic tagging
-        return listOf("#general")
-    }
-
-    private fun compress(text: String): String {
-        // TODO: Phase 2 - LZ4 compression
-        return text
-    }
-
-    companion object {
-        private const val TAG = "SoulManager"
+    private fun extractTags(text: String): List<String> {
+        val keywords = listOf("android", "kotlin", "omnihub", "code", "design", "api", "source", "memory")
+        val lower = text.lowercase()
+        return keywords.filter { it in lower }.take(6)
     }
 }
