@@ -1,6 +1,8 @@
 package com.omnihub
 
 import android.app.Application
+import com.omnihub.analytics.AnalyticsCollector
+import com.omnihub.analytics.AnalyticsRepository
 import com.omnihub.core.OmniRouter
 import com.omnihub.history.ChatRepository
 import com.omnihub.mcp.McpClient
@@ -31,6 +33,10 @@ class OmniHubApp : Application() {
         private set
     lateinit var mcp: McpClient
         private set
+    lateinit var analytics: AnalyticsCollector
+        private set
+    lateinit var analyticsRepo: AnalyticsRepository
+        private set
 
     override fun onCreate() {
         super.onCreate()
@@ -42,6 +48,8 @@ class OmniHubApp : Application() {
         mcp = McpClient(this)
         sourceManager = SourceManager(this)
         issueReporter = AutoIssueReporter(this)
+        analytics = AnalyticsCollector(this)
+        analyticsRepo = AnalyticsRepository(analytics, chatRepo, soul)
         ProviderBootstrap.reload(this, registry)
         router = OmniRouter(registry)
         sourceRouter = SourceRouter(sourceManager, soul, issueReporter)
