@@ -78,7 +78,7 @@ fun ChatScreen(
     var sending by remember { mutableStateOf(false) }
     var conversations by remember { mutableStateOf(listOf<ConversationEntity>()) }
     var incognito by remember { mutableStateOf(UserPrefs.isIncognito(context)) }
-    var greeting by remember { mutableStateOf("…") }
+    var greeting by remember { mutableStateOf("\u2026") }
     var showAddSheet by remember { mutableStateOf(false) }
     var showProviderSheet by remember { mutableStateOf(false) }
     var pendingAttachments by remember { mutableStateOf(listOf<String>()) }
@@ -100,7 +100,14 @@ fun ChatScreen(
 
     fun refreshGreeting() {
         val name = UserPrefs.getName(context)
-        val soul = runCatching { app.soul.generatePromptContext(maxUnits = 2).lines().firstOrNull()?.take(80) }.getOrNull()
+        // Non-suspend: use in-memory units only (generatePromptContext is suspend)
+        val soul = runCatching {
+            app.soul.loadUnits()
+                .sortedByDescending { it.importance * it.createdAt }
+                .firstOrNull()
+                ?.summary
+                ?.take(80)
+        }.getOrNull()
         greeting = timeGreeting(name, soul)
     }
 
@@ -268,7 +275,7 @@ fun ChatScreen(
                                 val mine = msg.role == "user"
                                 Row(Modifier.fillMaxWidth(), horizontalArrangement = if (mine) Arrangement.End else Arrangement.Start) {
                                     Surface(shape = RoundedCornerShape(16.dp), color = if (mine) OmniAmber.copy(alpha = 0.25f) else MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.widthIn(max = 320.dp)) {
-                                        Text(msg.content.ifBlank { "…" }, Modifier.padding(12.dp))
+                                        Text(msg.content.ifBlank { "\u2026" }, Modifier.padding(12.dp))
                                     }
                                 }
                             }
@@ -301,7 +308,7 @@ fun ChatScreen(
                         label = {
                             Row {
                                 Text(label)
-                                if (id != "auto" && !ProviderAuthStore.isSignedIn(context, id)) Text(" · sign in", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                if (id != "auto" && !ProviderAuthStore.isSignedIn(context, id)) Text(" \u00b7 sign in", color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                         },
                         selected = preferred == id,
