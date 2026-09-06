@@ -18,50 +18,34 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import com.omnihub.OmniHubApp
-import com.omnihub.source.SourceCatalog
-import com.omnihub.source.SourceDescriptor
+import com.omnihub.source.extension.ApkInstaller
 import com.omnihub.ui.theme.OmniAmber
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import org.json.JSONObject
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun StoreScreen(onBack: () -> Unit) {
     val context = LocalContext.current
-    val app = context.applicationContext as OmniHubApp
     val scope = rememberCoroutineScope()
     var loading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
-    var sources by remember { mutableStateOf<List<SourceDescriptor>>(emptyList()) }
+    var items by remember { mutableStateOf<List<ApkInstaller.ReleaseItem>>(emptyList()) }
     var query by remember { mutableStateOf("") }
     var filter by remember { mutableStateOf("ALL") }
-    var repoLabel by remember { mutableStateOf("benjaminchume-droid/OmniHub-Sources") }
-    var catalogUrl by remember {
-        mutableStateOf("https://raw.githubusercontent.com/benjaminchume-droid/OmniHub-Sources/main/catalog/index.min.json")
-    }
+    var installing by remember { mutableStateOf<String?>(null) }
 
     fun load() {
         scope.launch {
             loading = true
             error = null
             try {
-                val storeMeta = withContext(Dispatchers.IO) {
-                    runCatching {
-                        context.assets.open("store.json").bufferedReader().readText()
-                    }.getOrNull()
+                items = ApkInstaller.fetchReleases()
+                if (items.isEmpty()) {
+                    error = "No source APKs in Releases yet. Run OmniHub-Sources factory to publish APKs."
                 }
-                if (!storeMeta.isNullOrBlank()) {
-                    val o = JSONObject(storeMeta)
-                    repoLabel = o.optString("repo", repoLabel)
-                    catalogUrl = o.optString("catalogUrl", catalogUrl)
-                }
-                sources = SourceCatalog.fetch(catalogUrl)
             } catch (e: Exception) {
-                error = e.message ?: "Failed to load store"
-                sources = emptyList()
+                error = e.message ?: "Failed to load releases"
+                items = emptyList()
             }
             loading = false
         }
@@ -69,12 +53,10 @@ fun StoreScreen(onBack: () -> Unit) {
 
     LaunchedEffect(Unit) { load() }
 
-    val filtered = remember(sources, query, filter) {
-        sources.filter { s ->
-            (filter == "ALL" || s.kind.equals(filter, true) ||
-                (filter == "WEB_SESSION" && s.kind.contains("WEB", true))) &&
-                (query.isBlank() || s.name.contains(query, true) || s.id.contains(query, true) ||
-                    s.description.contains(query, true))
+    val filtered = remember(items, query, filter) {
+        items.filter { s ->
+            (filter == "ALL" || s.kind.equals(filter, true)) &&
+                (query.isBlank() || s.name.contains(query, true) || s.id.contains(query, true))
         }
     }
 
@@ -83,19 +65,15 @@ fun StoreScreen(onBack: () -> Unit) {
             TopAppBar(
                 title = {
                     Column {
-                        Text("Omni Store", fontWeight = FontWeight.SemiBold)
-                        Text(repoLabel, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("OmniSource Store", fontWeight = FontWeight.SemiBold)
+                        Text("From GitHub Releases", style = MaterialTheme.typography.labelSmall)
                     }
                 },
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back")
-                    }
+                    IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
                 },
                 actions = {
-                    IconButton(onClick = { load() }) {
-                        Icon(Icons.Default.Refresh, "Refresh")
-                    }
+                    IconButton(onClick = { load() }) { Icon(Icons.Default.Refresh, "Refresh") }
                 }
             )
         }
@@ -111,90 +89,72 @@ fun StoreScreen(onBack: () -> Unit) {
             )
             Spacer(Modifier.height(8.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                listOf("ALL", "API", "WEB_SESSION", "MCP").forEach { f ->
-                    FilterChip(
-                        selected = filter == f,
-                        onClick = { filter = f },
-                        label = { Text(if (f == "WEB_SESSION") "Web" else f) }
-                    )
+                listOf("ALL", "WEB", "MCP").forEach { f ->
+                    FilterChip(selected = filter == f, onClick = { filter = f }, label = { Text(f) })
                 }
             }
             Spacer(Modifier.height(8.dp))
             Text(
-                "${filtered.size} sources · catalog live from GitHub",
+                "${filtered.size} APKs · enable Install unknown apps for OmniHub",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             Spacer(Modifier.height(8.dp))
-
             when {
                 loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     CircularProgressIndicator(color = OmniAmber)
                 }
-                error != null -> Column(
+                error != null && items.isEmpty() -> Column(
                     Modifier.fillMaxSize(),
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center
                 ) {
                     Icon(Icons.Default.Store, null, tint = OmniAmber)
-                    Text(error!!, color = MaterialTheme.colorScheme.error)
+                    Spacer(Modifier.height(8.dp))
+                    Text(error!!, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(Modifier.height(12.dp))
                     Button(
                         onClick = { load() },
                         colors = ButtonDefaults.buttonColors(containerColor = OmniAmber, contentColor = Color.Black)
                     ) { Text("Retry") }
                 }
                 else -> LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items(filtered, key = { it.id }) { desc ->
-                        StoreSourceCard(
-                            desc = desc,
-                            installed = app.sourceManager.get(desc.id) != null,
-                            onInstall = {
-                                scope.launch {
-                                    try {
-                                        app.sourceManager.installDescriptor(desc)
-                                        Toast.makeText(context, "Installed ${desc.name}", Toast.LENGTH_SHORT).show()
-                                    } catch (e: Exception) {
-                                        Toast.makeText(context, e.message ?: "Install failed", Toast.LENGTH_LONG).show()
-                                    }
+                    items(filtered, key = { it.apkUrl }) { rel ->
+                        Card(shape = RoundedCornerShape(14.dp), modifier = Modifier.fillMaxWidth()) {
+                            Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Default.CloudDownload, null, tint = OmniAmber)
+                                Spacer(Modifier.width(12.dp))
+                                Column(Modifier.weight(1f)) {
+                                    Text(rel.name, fontWeight = FontWeight.SemiBold)
+                                    Text(
+                                        "${rel.kind} · ${rel.tag} · ${rel.size / 1024} KB",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
                                 }
+                                Button(
+                                    onClick = {
+                                        scope.launch {
+                                            installing = rel.id
+                                            try {
+                                                val file = ApkInstaller.downloadApk(context, rel.apkUrl, "${rel.id}.apk")
+                                                ApkInstaller.promptInstall(context, file)
+                                                Toast.makeText(context, "Allow install from this source if asked", Toast.LENGTH_LONG).show()
+                                            } catch (e: Exception) {
+                                                Toast.makeText(context, e.message ?: "Install failed", Toast.LENGTH_LONG).show()
+                                            } finally {
+                                                installing = null
+                                            }
+                                        }
+                                    },
+                                    enabled = installing == null,
+                                    colors = ButtonDefaults.buttonColors(containerColor = OmniAmber, contentColor = Color.Black)
+                                ) { Text(if (installing == rel.id) "\u2026" else "Install") }
                             }
-                        )
+                        }
                     }
                     item { Spacer(Modifier.height(24.dp)) }
                 }
-            }
-        }
-    }
-}
-
-@Composable
-private fun StoreSourceCard(
-    desc: SourceDescriptor,
-    installed: Boolean,
-    onInstall: () -> Unit
-) {
-    Card(shape = RoundedCornerShape(14.dp), modifier = Modifier.fillMaxWidth()) {
-        Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-            Icon(Icons.Default.CloudDownload, null, tint = OmniAmber)
-            Spacer(Modifier.width(12.dp))
-            Column(Modifier.weight(1f)) {
-                Text(desc.name, fontWeight = FontWeight.SemiBold)
-                Text(
-                    "${desc.kind} · ${desc.authType} · ${desc.revision}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                if (desc.description.isNotBlank()) {
-                    Text(desc.description, style = MaterialTheme.typography.bodySmall, maxLines = 2)
-                }
-            }
-            if (installed) {
-                Text("Installed", color = OmniAmber, style = MaterialTheme.typography.labelMedium)
-            } else {
-                Button(
-                    onClick = onInstall,
-                    colors = ButtonDefaults.buttonColors(containerColor = OmniAmber, contentColor = Color.Black)
-                ) { Text("Install") }
             }
         }
     }
