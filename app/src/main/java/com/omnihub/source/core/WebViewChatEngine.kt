@@ -12,10 +12,9 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 
 /**
- * Real WebCore send path: load the provider site in a WebView (with existing cookies),
- * inject the user message into the page UI, wait for an assistant bubble, return text.
- *
- * This is intentionally not cookie→OkHttp. The page talks to the provider itself.
+ * Universal WebCore send path.
+ * Does not hardcode button positions or site-specific selectors as requirements.
+ * PageSensor scores visible inputs/buttons; PageActor types+sends; ReplyObserver waits for stable new text.
  */
 object WebViewChatEngine {
 
@@ -26,7 +25,7 @@ object WebViewChatEngine {
         siteUrl: String,
         providerId: String,
         userMessage: String,
-        timeoutMs: Long = 90_000L
+        timeoutMs: Long = 120_000L
     ): Result = suspendCancellableCoroutine { cont ->
         val main = Handler(Looper.getMainLooper())
         main.post {
@@ -36,7 +35,11 @@ object WebViewChatEngine {
             fun complete(text: String, ok: Boolean) {
                 if (finished) return
                 finished = true
-                try { web.stopLoading(); web.destroy() } catch (_: Exception) {}
+                try {
+                    web.stopLoading()
+                    web.destroy()
+                } catch (_: Exception) {
+                }
                 if (cont.isActive) cont.resume(Result(text, ok))
             }
 
@@ -46,8 +49,8 @@ object WebViewChatEngine {
                     main.post {
                         val t = text.trim()
                         when {
-                            t.startsWith("ERR:") -> complete(t.removePrefix("ERR:"), false)
-                            t.isBlank() -> complete("No reply from page.", false)
+                            t.startsWith("ERR:") -> complete(t.removePrefix("ERR:").ifBlank { "Page error" }, false)
+                            t.isBlank() -> complete("Empty reply from page.", false)
                             else -> complete(t, true)
                         }
                     }
@@ -66,116 +69,203 @@ object WebViewChatEngine {
 
             web.webViewClient = object : WebViewClient() {
                 override fun onPageFinished(view: WebView?, url: String?) {
-                    // Give the SPA a moment, then inject
                     main.postDelayed({
-                        val js = buildInjectScript(providerId, userMessage)
-                        view?.evaluateJavascript(js, null)
-                    }, 2500)
+                        view?.evaluateJavascript(buildUniversalScript(userMessage), null)
+                    }, 2800)
                 }
             }
 
             cont.invokeOnCancellation {
                 main.post {
-                    try { web.stopLoading(); web.destroy() } catch (_: Exception) {}
+                    try {
+                        web.stopLoading()
+                        web.destroy()
+                    } catch (_: Exception) {
+                    }
                 }
             }
 
             main.postDelayed({
-                complete("Timed out waiting for $providerId page reply.", false)
+                complete("Timed out waiting for reply on page.", false)
             }, timeoutMs)
 
-            val target = when {
-                providerId.contains("chatgpt", true) -> "https://chatgpt.com/"
-                siteUrl.isNotBlank() -> siteUrl
-                else -> "https://chatgpt.com/"
+            val target = siteUrl.ifBlank {
+                ProviderCatalog.urlFor(providerId) ?: "https://chatgpt.com/"
             }
             web.loadUrl(target)
         }
     }
 
-    private fun buildInjectScript(providerId: String, message: String): String {
+    /**
+     * Universal sensor + actor + observer. No required fixed selectors.
+     * Optional soft text hints only boost scores.
+     */
+    private fun buildUniversalScript(message: String): String {
         val escaped = message
             .replace("\\", "\\\\")
             .replace("'", "\\'")
             .replace("\n", "\\n")
             .replace("\r", "")
 
-        // ChatGPT-focused selectors; generic textarea fallback for other sites
         return """
-            (function() {
-              var msg = '$escaped';
-              function fail(t) { OmniBridge.onReply('ERR:' + t); }
-              function ok(t) { OmniBridge.onReply(t); }
+(function(){
+  var MSG = '$escaped';
+  function fail(t){ try{ OmniBridge.onReply('ERR:'+t); }catch(e){} }
+  function ok(t){ try{ OmniBridge.onReply(t); }catch(e){} }
 
-              function findInput() {
-                return document.querySelector('#prompt-textarea')
-                  || document.querySelector('[data-testid="prompt-textarea"]')
-                  || document.querySelector('div[contenteditable="true"]')
-                  || document.querySelector('textarea');
-              }
+  function visible(el){
+    if(!el) return false;
+    var r = el.getBoundingClientRect();
+    if(r.width < 8 || r.height < 8) return false;
+    var st = window.getComputedStyle(el);
+    if(st.display==='none' || st.visibility==='hidden' || st.opacity==='0') return false;
+    return r.bottom > 0 && r.top < (window.innerHeight||800);
+  }
 
-              function findSend() {
-                return document.querySelector('[data-testid="send-button"]')
-                  || document.querySelector('button[aria-label*="Send"]')
-                  || document.querySelector('button[data-testid="fruitjuice-send-button"]');
-              }
+  function scoreInput(el){
+    var s = 0;
+    var r = el.getBoundingClientRect();
+    var tag = (el.tagName||'').toLowerCase();
+    var ph = ((el.getAttribute('placeholder')||'') + ' ' + (el.getAttribute('aria-label')||'') + ' ' + (el.getAttribute('data-testid')||'') + ' ' + (el.id||'')).toLowerCase();
+    if(tag==='textarea') s += 30;
+    if(el.isContentEditable || el.getAttribute('contenteditable')==='true') s += 28;
+    if(tag==='input' && (el.type==='text'||el.type==='search'||!el.type)) s += 12;
+    if(r.width > 180) s += 15;
+    if(r.height > 24) s += 8;
+    if(r.top > (window.innerHeight||800)*0.45) s += 20; // lower half
+    if(/message|ask|prompt|chat|send a|type|write|talk/.test(ph)) s += 25;
+    if(/search|email|password|user/.test(ph)) s -= 40;
+    if(!visible(el)) s -= 100;
+    if(el.disabled || el.readOnly) s -= 50;
+    return s;
+  }
 
-              function lastAssistant() {
-                var nodes = document.querySelectorAll('[data-message-author-role="assistant"]');
-                if (nodes && nodes.length) {
-                  var n = nodes[nodes.length - 1];
-                  return (n.innerText || n.textContent || '').trim();
-                }
-                // generic: last large prose block after user
-                var arts = document.querySelectorAll('article, .markdown, .prose');
-                if (arts && arts.length) {
-                  return (arts[arts.length-1].innerText || '').trim();
-                }
-                return '';
-              }
+  function findInput(){
+    var nodes = Array.prototype.slice.call(document.querySelectorAll('textarea, [contenteditable="true"], input[type="text"], input:not([type]), input[type="search"]'));
+    var best = null, bestScore = -999;
+    nodes.forEach(function(el){
+      var sc = scoreInput(el);
+      if(sc > bestScore){ bestScore = sc; best = el; }
+    });
+    if(best && bestScore >= 20) return best;
+    return null;
+  }
 
-              var input = findInput();
-              if (!input) { fail('Chat input not found — sign in and open a chat first.'); return; }
+  function scoreSend(btn, inputRect){
+    var s = 0;
+    var r = btn.getBoundingClientRect();
+    var label = ((btn.getAttribute('aria-label')||'') + ' ' + (btn.innerText||'') + ' ' + (btn.getAttribute('data-testid')||'') + ' ' + (btn.getAttribute('title')||'')).toLowerCase();
+    if(/send|submit|arrow|reply/.test(label)) s += 35;
+    if(btn.tagName==='BUTTON') s += 10;
+    if(inputRect){
+      var dx = Math.abs((r.left+r.right)/2 - (inputRect.left+inputRect.right)/2);
+      var dy = Math.abs((r.top+r.bottom)/2 - (inputRect.top+inputRect.bottom)/2);
+      if(dy < 80 && dx < 420) s += 25;
+      if(r.left >= inputRect.right - 20) s += 10;
+    }
+    if(r.top > (window.innerHeight||800)*0.5) s += 10;
+    if(!visible(btn)) s -= 100;
+    if(btn.disabled) s -= 30;
+    return s;
+  }
 
-              var before = lastAssistant();
+  function findSend(input){
+    var inputRect = input ? input.getBoundingClientRect() : null;
+    var nodes = Array.prototype.slice.call(document.querySelectorAll('button, [role="button"], input[type="submit"]'));
+    var best = null, bestScore = -999;
+    nodes.forEach(function(el){
+      var sc = scoreSend(el, inputRect);
+      if(sc > bestScore){ bestScore = sc; best = el; }
+    });
+    if(best && bestScore >= 25) return best;
+    return null;
+  }
 
-              try {
-                input.focus();
-                if (input.tagName === 'TEXTAREA' || input.tagName === 'INPUT') {
-                  var nativeSet = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')
-                    || Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
-                  if (nativeSet && nativeSet.set) nativeSet.set.call(input, msg);
-                  else input.value = msg;
-                  input.dispatchEvent(new Event('input', { bubbles: true }));
-                } else {
-                  input.textContent = msg;
-                  input.dispatchEvent(new InputEvent('input', { bubbles: true, data: msg }));
-                }
-              } catch (e) { fail('Could not fill input: ' + e); return; }
+  function chatRoot(){
+    return document.querySelector('main') || document.querySelector('[role="main"]') || document.body;
+  }
 
-              setTimeout(function() {
-                var btn = findSend();
-                if (btn && !btn.disabled) {
-                  btn.click();
-                } else {
-                  // Enter key fallback
-                  input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }));
-                }
+  function snapshotText(){
+    var root = chatRoot();
+    return (root && (root.innerText || root.textContent) || '').trim();
+  }
 
-                var tries = 0;
-                var timer = setInterval(function() {
-                  tries++;
-                  var text = lastAssistant();
-                  if (text && text !== before && text.length > 1) {
-                    clearInterval(timer);
-                    ok(text);
-                  } else if (tries > 60) {
-                    clearInterval(timer);
-                    fail('No assistant reply detected on page.');
-                  }
-                }, 1000);
-              }, 400);
-            })();
+  function setNativeValue(el, value){
+    try {
+      var proto = el.tagName==='TEXTAREA' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+      var desc = Object.getOwnPropertyDescriptor(proto, 'value');
+      if(desc && desc.set) desc.set.call(el, value); else el.value = value;
+    } catch(e){ el.value = value; }
+    el.dispatchEvent(new Event('input', {bubbles:true}));
+    el.dispatchEvent(new Event('change', {bubbles:true}));
+  }
+
+  function fill(el, text){
+    el.focus();
+    if(el.isContentEditable || el.getAttribute('contenteditable')==='true'){
+      el.textContent = text;
+      try {
+        el.dispatchEvent(new InputEvent('input', {bubbles:true, data:text, inputType:'insertText'}));
+      } catch(e){
+        el.dispatchEvent(new Event('input', {bubbles:true}));
+      }
+    } else {
+      setNativeValue(el, text);
+    }
+  }
+
+  function pressEnter(el){
+    ['keydown','keypress','keyup'].forEach(function(type){
+      el.dispatchEvent(new KeyboardEvent(type, {key:'Enter', code:'Enter', keyCode:13, which:13, bubbles:true}));
+    });
+  }
+
+  var input = findInput();
+  if(!input){ fail('No chat input found on page. Sign in and open the chat screen first.'); return; }
+
+  var before = snapshotText();
+  fill(input, MSG);
+
+  setTimeout(function(){
+    var btn = findSend(input);
+    if(btn){ try { btn.click(); } catch(e) { pressEnter(input); } }
+    else { pressEnter(input); }
+
+    var stable = 0;
+    var last = '';
+    var tries = 0;
+    var timer = setInterval(function(){
+      tries++;
+      var now = snapshotText();
+      // Prefer growth after our send
+      if(now && now.length > before.length + Math.min(8, MSG.length)){
+        // extract tail delta roughly
+        var delta = now;
+        if(before && now.indexOf(before) === 0) delta = now.slice(before.length).trim();
+        // ignore pure echo of user message
+        if(delta && delta.indexOf(MSG) === 0 && delta.length < MSG.length + 8) {
+          // still waiting
+        } else if(delta && delta.length > 2){
+          if(delta === last){
+            stable++;
+            if(stable >= 3){
+              clearInterval(timer);
+              ok(delta);
+            }
+          } else {
+            stable = 0;
+            last = delta;
+          }
+        }
+      }
+      if(tries > 90){
+        clearInterval(timer);
+        if(last && last.length > 2) ok(last);
+        else fail('No assistant reply detected.');
+      }
+    }, 800);
+  }, 350);
+})();
         """.trimIndent()
     }
 }
