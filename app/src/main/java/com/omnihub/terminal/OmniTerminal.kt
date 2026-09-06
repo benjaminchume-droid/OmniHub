@@ -9,11 +9,9 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.concurrent.TimeUnit
 
-/** Policy-gated command runtime for the agent. */
 class OmniTerminal(
     private val context: Context,
-    private val workspace: OmniWorkspace,
-    private val permissions: PermissionEngine = PermissionEngine()
+    private val workspace: OmniWorkspace
 ) {
     data class Result(
         val exitCode: Int,
@@ -31,7 +29,7 @@ class OmniTerminal(
         workDir: File? = null
     ): Result = withContext(Dispatchers.IO) {
         val risk = classify(command)
-        if (!permissions.allow(risk)) {
+        if (!PermissionEngine.allow(risk)) {
             return@withContext Result(-1, "", "Blocked by permission engine (risk=$risk)", shell.name)
         }
         val cwd = workDir ?: workspace.root()
