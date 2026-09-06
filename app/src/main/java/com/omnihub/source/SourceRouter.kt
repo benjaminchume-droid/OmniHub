@@ -23,7 +23,18 @@ class SourceRouter(
         val coding: Boolean = false,
         val research: Boolean = false,
         val vision: Boolean = false
-    )
+    ) {
+        companion object {
+            fun fromPrompt(text: String): TaskHints {
+                val t = text.lowercase()
+                return TaskHints(
+                    coding = listOf("code", "kotlin", "python", "sql", "build", "compile", "debug").any { it in t },
+                    research = listOf("search", "research", "find", "lookup", "news").any { it in t },
+                    vision = listOf("image", "screenshot", "photo", "vision").any { it in t }
+                )
+            }
+        }
+    }
 
     suspend fun chat(
         messages: List<ChatMessage>,
