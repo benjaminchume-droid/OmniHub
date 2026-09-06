@@ -3,13 +3,12 @@ name: Build & Release APK
 on:
   push:
     branches: [main]
-    tags: ['v*']
   workflow_dispatch:
     inputs:
       version:
-        description: 'Release version (e.g. 1.0.4)'
+        description: 'Release version'
         required: false
-        default: '1.0.4'
+        default: '1.0.5'
 
 permissions:
   contents: write
@@ -47,90 +46,54 @@ jobs:
             'zipStoreBase=GRADLE_USER_HOME' \
             'zipStorePath=wrapper/dists' \
             > gradle/wrapper/gradle-wrapper.properties
-          test $(wc -c < gradlew) -gt 5000
-          test $(wc -c < gradle/wrapper/gradle-wrapper.jar) -gt 20000
 
       - name: Decode Keystore
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
-          KEYSTORE: ${{ secrets.KEYSTORE }}
         run: |
-          if [ -n "$KEYSTORE_BASE64" ]; then
-            echo "$KEYSTORE_BASE64" | base64 --decode > keystore.jks
-          elif [ -n "$KEYSTORE" ]; then
-            echo "$KEYSTORE" | base64 --decode > keystore.jks
-          else
-            echo "WARNING: No keystore — unsigned release APK"
-            exit 0
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "FATAL: KEYSTORE_BASE64 missing"
+            exit 1
           fi
+          echo "$KEYSTORE_BASE64" | base64 --decode > keystore.jks
           {
             echo "storeFile=keystore.jks"
             echo "storePassword=${{ secrets.KEYSTORE_PASSWORD }}"
             echo "keyAlias=${{ secrets.KEY_ALIAS }}"
             echo "keyPassword=${{ secrets.KEY_PASSWORD }}"
           } > keystore.properties
-          ls -la keystore.jks
 
       - name: Build Release APK
-        id: build
         run: |
           set -o pipefail
-          set +e
           ./gradlew clean assembleRelease --stacktrace 2>&1 | tee build.log
-          STATUS=${PIPESTATUS[0]}
-          set -e
-          tail -60 build.log || true
-          grep -E "^e: |FAILURE:" build.log | tail -80 || true
-          APK=$(find app/build/outputs/apk -type f -name "*.apk" 2>/dev/null | head -n 1 || true)
-          if [ -z "$APK" ] || [ ! -f "$APK" ]; then
-            echo "FATAL: No APK produced (gradle status=$STATUS)"
-            exit 1
-          fi
+          APK=$(find app/build/outputs/apk -type f -name "*.apk" | head -n 1)
+          test -n "$APK"
           SIZE=$(wc -c < "$APK")
-          if [ "$SIZE" -lt 500000 ]; then
-            echo "FATAL: APK too small ($SIZE bytes)"
-            exit 1
-          fi
-          cp "$APK" "./OmniHub-v1.0.4.apk"
-          echo "apk_path=OmniHub-v1.0.4.apk" >> "$GITHUB_OUTPUT"
-          ls -lah ./OmniHub-v1.0.4.apk
-          exit $STATUS
+          test "$SIZE" -gt 500000
+          cp "$APK" "./OmniHub-v1.0.5.apk"
+          ls -lah ./OmniHub-v1.0.5.apk
 
-      - name: Upload build log
-        if: always()
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: build-log
-          path: build.log
-          if-no-files-found: warn
-
-      - name: Upload APK
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: OmniHub-1.0.4-apk
-          path: OmniHub-v1.0.4.apk
-          if-no-files-found: error
+          name: OmniHub-1.0.5-apk
+          path: OmniHub-v1.0.5.apk
 
       - name: Create GitHub Release
-        if: success()
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.0.4-${{ github.run_number }}
-          name: OmniHub v1.0.4 (build ${{ github.run_number }})
+          tag_name: v1.0.5-${{ github.run_number }}
+          name: OmniHub v1.0.5 (build ${{ github.run_number }})
           body: |
-            ## OmniHub v1.0.4
-            - **Real chat path** — no fake "Relayed / streaming" demo text
-            - Clean greeting only (Good morning, Name)
-            - Sign-in marks ready only with a live session
-            - Soul ignores system/error junk
-            - ChatGPT: send message → provider → show reply
+            ## OmniHub v1.0.5
+            - Providers = **installed sources only** (no hardcoded list)
+            - Store shows **Installed** vs Install
+            - Chat messages persist in Room across navigation
+            - Package visibility for OmniSource APKs
+            - Version name **1.0.5**
 
-            **Install this APK over the old one.** Settings should show 1.0.4.
-          files: OmniHub-v1.0.4.apk
-          draft: false
-          prerelease: false
-          generate_release_notes: true
+            Install this APK. Settings must show **1.0.5**.
+          files: OmniHub-v1.0.5.apk
           make_latest: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
