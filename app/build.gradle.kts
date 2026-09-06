@@ -12,8 +12,9 @@ android {
         applicationId = "com.omnihub"
         minSdk = 26
         targetSdk = 35
-        versionCode = 11
-        versionName = "1.0.7-nightly"
+        // Nightly scheme: 1.major.minor.patch  (4-part)
+        versionCode = 10800
+        versionName = "1.0.8.0"
     }
 
     signingConfigs {
@@ -45,9 +46,7 @@ android {
                 signingConfig = releaseSigning
             }
         }
-        debug {
-            isMinifyEnabled = false
-        }
+        debug { isMinifyEnabled = false }
     }
 
     buildFeatures {
