@@ -79,6 +79,7 @@ fun OmniHubNav() {
         composable("sources") { SourcesScreen(onBack = { navController.popBackStack() }) }
         composable("analytics") { AnalyticsScreen(onBack = { navController.popBackStack() }) }
         composable("store") { StoreScreen(onBack = { navController.popBackStack() }) }
+        composable("file_explorer") { FileExplorerScreen(onBack = { navController.popBackStack() }) }
         composable("legal/{doc}", arguments = listOf(navArgument("doc") { type = NavType.StringType })) { entry ->
             val doc = LegalDoc.valueOf(entry.arguments?.getString("doc") ?: LegalDoc.PRIVACY.name)
             LegalScreen(doc = doc, onBack = { navController.popBackStack() })

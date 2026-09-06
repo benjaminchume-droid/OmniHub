@@ -5,6 +5,7 @@ import com.omnihub.analytics.AnalyticsCollector
 import com.omnihub.analytics.AnalyticsRepository
 import com.omnihub.core.OmniRouter
 import com.omnihub.history.ChatRepository
+import com.omnihub.history.IncognitoRetention
 import com.omnihub.mcp.McpClient
 import com.omnihub.providers.ProviderRegistry
 import com.omnihub.providers.impl.ProviderBootstrap
@@ -61,6 +62,7 @@ class OmniHubApp : Application() {
         ProviderBootstrap.reload(this, registry)
         router = OmniRouter(registry)
         sourceRouter = SourceRouter(sourceManager, soul, issueReporter)
+        IncognitoRetention.purgeExpired(this)
     }
 
     fun reloadProviders() {
