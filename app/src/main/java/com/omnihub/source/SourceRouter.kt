@@ -94,7 +94,7 @@ class SourceRouter(
                     totalTokens = 0,
                     tokensEstimated = true
                 )
-                issueReporter.report(src.info.id, src.info.name, e.message ?: e.toString())
+                issueReporter.reportFailure(src.info.id, src.info.name, e.message ?: e.toString())
             }
         }
         throw last ?: IllegalStateException("All sources failed")
