@@ -7,6 +7,7 @@ import android.util.Log
 import com.omnihub.source.AiSource
 import com.omnihub.source.SourceKind
 import com.omnihub.source.bundled.WebProviderSource
+import com.omnihub.source.core.ProviderCatalog
 
 object InstalledSourceScanner {
     private const val TAG = "InstalledSourceScanner"
@@ -14,19 +15,6 @@ object InstalledSourceScanner {
     private const val META_NAME = "omnihub.source.name"
     private const val META_KIND = "omnihub.source.kind"
     private const val META_URL = "omnihub.source.url"
-
-    private val KNOWN_URLS = mapOf(
-        "chatgpt" to "https://chatgpt.com",
-        "claude" to "https://claude.ai",
-        "gemini" to "https://gemini.google.com",
-        "perplexity" to "https://www.perplexity.ai",
-        "deepseek" to "https://chat.deepseek.com",
-        "grok" to "https://x.com/i/grok",
-        "groq" to "https://chat.groq.com",
-        "kimi" to "https://kimi.moonshot.cn",
-        "zai" to "https://chat.z.ai",
-        "hy3" to "https://hy3.ai"
-    )
 
     data class Installed(
         val packageName: String,
@@ -65,29 +53,19 @@ object InstalledSourceScanner {
                     pm.getApplicationInfo(pkg, PackageManager.GET_META_DATA)
                 }
                 val meta = ai.metaData
-                val id = meta?.getString(META_ID)
-                    ?: pkg.removePrefix("com.omnisource.").replace('_', '-').substringBefore('-')
-                    .ifBlank { pkg.removePrefix("com.omnisource.") }
-                // normalize common ids
-                val normId = when {
-                    id.contains("chatgpt", true) || pkg.contains("chatgpt") -> "chatgpt"
-                    id.contains("claude", true) -> "claude"
-                    id.contains("gemini", true) -> "gemini"
-                    id.contains("perplexity", true) -> "perplexity"
-                    id.contains("deepseek", true) -> "deepseek"
-                    id.contains("grok", true) -> "grok"
-                    id.contains("groq", true) -> "groq"
-                    id.contains("kimi", true) -> "kimi"
-                    id.contains("zai", true) || id == "z_ai" -> "zai"
-                    else -> id
-                }
+                val rawId = meta?.getString(META_ID)
+                    ?: pkg.removePrefix("com.omnisource.").replace('_', '-')
+                val normId = normalizeId(rawId, pkg)
+                val catalog = ProviderCatalog.ALL.find { it.id.equals(normId, true) }
                 val name = meta?.getString(META_NAME)
-                    ?: KNOWN_URLS.keys.find { it == normId }?.replaceFirstChar { it.titlecase() }
-                    ?: normId
-                val kind = meta?.getString(META_KIND) ?: if (normId.startsWith("mcp")) "MCP" else "WEB"
-                val url = meta?.getString(META_URL)
-                    ?.takeIf { it.startsWith("http") }
-                    ?: KNOWN_URLS[normId]
+                    ?: catalog?.name
+                    ?: normId.replaceFirstChar { it.titlecase() }
+                val kind = meta?.getString(META_KIND)
+                    ?: catalog?.kind
+                    ?: if (normId.startsWith("mcp")) "MCP" else "WEB"
+                val url = meta?.getString(META_URL)?.takeIf { it.startsWith("http") }
+                    ?: catalog?.url
+                    ?: ProviderCatalog.urlFor(normId)
                     ?: "https://chatgpt.com"
                 out.add(Installed(pkg, normId, name, kind, url))
             } catch (e: Exception) {
@@ -95,6 +73,23 @@ object InstalledSourceScanner {
             }
         }
         return out.distinctBy { it.id }
+    }
+
+    private fun normalizeId(id: String, pkg: String): String {
+        val s = id.lowercase()
+        val p = pkg.lowercase()
+        return when {
+            s.contains("chatgpt") || p.contains("chatgpt") -> "chatgpt"
+            s.contains("claude") || p.contains("claude") -> "claude"
+            s.contains("gemini") || p.contains("gemini") -> "gemini"
+            s.contains("perplexity") -> "perplexity"
+            s.contains("deepseek") -> "deepseek"
+            s.contains("grok") -> "grok"
+            s.contains("groq") -> "groq"
+            s.contains("kimi") -> "kimi"
+            s.contains("zai") || s == "z_ai" || s == "z-ai" -> "zai"
+            else -> s.replace('_', '-').trim('-')
+        }
     }
 
     fun isPackageInstalled(context: Context, packageName: String): Boolean =
@@ -116,8 +111,7 @@ object InstalledSourceScanner {
     }
 
     fun isSourceInstalled(context: Context, sourceId: String): Boolean {
-        val pkg = packageForId(sourceId)
-        if (isPackageInstalled(context, pkg)) return true
+        if (isPackageInstalled(context, packageForId(sourceId))) return true
         return scan(context).any {
             it.id.equals(sourceId, true) ||
                 it.id.contains(sourceId, true) ||
