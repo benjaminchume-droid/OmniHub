@@ -16,6 +16,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.omnihub.BuildConfig
 import com.omnihub.OmniHubApp
 import com.omnihub.data.SecureStore
 import com.omnihub.data.UserPrefs
@@ -173,7 +174,7 @@ fun SettingsScreen(
             HorizontalDivider(Modifier.padding(vertical = 8.dp))
             ListItem(
                 headlineContent = { Text("Version") },
-                supportingContent = { Text("1.0.3") },
+                supportingContent = { Text(BuildConfig.VERSION_NAME) },
                 leadingContent = { Icon(Icons.Default.Info, null) }
             )
             ListItem(
@@ -182,7 +183,10 @@ fun SettingsScreen(
                 leadingContent = { Icon(Icons.Default.RecordVoiceOver, null) },
                 modifier = Modifier.clickable {
                     try {
-                        context.startActivity(Intent(Settings.ACTION_VOICE_INPUT_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                        context.startActivity(
+                            Intent(Settings.ACTION_VOICE_INPUT_SETTINGS)
+                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        )
                     } catch (_: Exception) {
                         Toast.makeText(context, "Open system settings", Toast.LENGTH_SHORT).show()
                     }
