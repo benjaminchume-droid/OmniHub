@@ -19,6 +19,12 @@ class SourceRouter(
         val sourceName: String
     )
 
+    data class TaskHints(
+        val coding: Boolean = false,
+        val research: Boolean = false,
+        val vision: Boolean = false
+    )
+
     suspend fun chat(
         messages: List<ChatMessage>,
         preferredSourceId: String? = null,
@@ -29,7 +35,7 @@ class SourceRouter(
         val candidates = rank(preferredSourceId, taskHints)
         if (candidates.isEmpty()) {
             throw IllegalStateException(
-                "No configured Sources. Open Sources and add an API key for ChatGPT / Claude / Gemini / DeepSeek / …"
+                "No providers ready. Open Store and install a Web or MCP source."
             )
         }
 
@@ -75,13 +81,6 @@ class SourceRouter(
                 val duration = System.currentTimeMillis() - started
                 val timedOut = e.message?.contains("timeout", ignoreCase = true) == true ||
                     e.message?.contains("timed out", ignoreCase = true) == true
-                val cat = when {
-                    timedOut -> "timeout"
-                    e.message?.contains("401") == true || e.message?.contains("auth", true) == true -> "authentication"
-                    e.message?.contains("429") == true -> "rate_limit"
-                    e.message?.contains("network", true) == true || e is java.io.IOException -> "network"
-                    else -> "provider"
-                }
                 analytics?.recordRequestResult(
                     requestId = requestId,
                     conversationId = conversationId,
@@ -93,65 +92,32 @@ class SourceRouter(
                     inputTokens = 0,
                     outputTokens = 0,
                     totalTokens = 0,
-                    tokensEstimated = false,
-                    errorCategory = cat
+                    tokensEstimated = true
                 )
-                issueReporter.report(src.info.id, e.message ?: "route failure")
+                issueReporter.report(src.info.id, src.info.name, e.message ?: e.toString())
             }
         }
-        throw last ?: IllegalStateException("All Sources failed")
-    }
-
-    private fun estimateTokens(user: String, assistant: String): Int {
-        val chars = user.length + assistant.length
-        return (chars / 4).coerceAtLeast(1)
+        throw last ?: IllegalStateException("All sources failed")
     }
 
     private fun rank(preferred: String?, hints: TaskHints): List<AiSource> {
-        val configured = sourceManager.configured()
-        if (configured.isEmpty()) return emptyList()
-        return configured.map { src ->
-            var score = 1.0
-            when (src.health()) {
-                SourceHealth.HEALTHY -> score += 2.0
-                SourceHealth.DEGRADED -> score += 0.5
-                SourceHealth.AUTH_REQUIRED -> score -= 10.0
-                else -> score -= 5.0
-            }
-            if (preferred != null && src.info.id == preferred) score += 5.0
-            val caps = src.info.capabilities
-            if (hints.needsResearch && caps.research) score += 3.0
-            if (hints.needsCoding && caps.coding) score += 2.5
-            if (hints.needsVision && caps.vision) score += 2.0
-            score += when (src.info.id) {
-                "anthropic" -> if (hints.needsCoding) 1.5 else 0.8
-                "gemini" -> if (hints.needsVision) 1.5 else 0.5
-                "perplexity" -> if (hints.needsResearch) 2.0 else 0.2
-                "deepseek", "zai", "kimi" -> if (hints.needsCoding) 1.2 else 0.4
-                "groq" -> if (hints.preferFast) 1.5 else 0.3
-                "openai" -> 1.0
-                else -> 0.5
-            }
-            src to score
-        }.filter { it.second > 0 }.sortedByDescending { it.second }.map { it.first }
+        val all = sourceManager.all()
+        val preferredSrc = preferred?.let { id -> all.find { it.info.id == id } }
+        val rest = all.filter { it.info.id != preferred }
+            .sortedByDescending { score(it, hints) }
+        return listOfNotNull(preferredSrc) + rest
     }
 
-    data class TaskHints(
-        val needsResearch: Boolean = false,
-        val needsCoding: Boolean = false,
-        val needsVision: Boolean = false,
-        val preferFast: Boolean = false
-    ) {
-        companion object {
-            fun fromPrompt(prompt: String): TaskHints {
-                val p = prompt.lowercase()
-                return TaskHints(
-                    needsResearch = listOf("research", "search", "news", "cite", "source").any { it in p },
-                    needsCoding = listOf("code", "kotlin", "android", "bug", "compile", "function", "class").any { it in p },
-                    needsVision = listOf("image", "screenshot", "photo", "picture").any { it in p },
-                    preferFast = listOf("quick", "fast", "brief").any { it in p }
-                )
-            }
-        }
+    private fun score(src: AiSource, hints: TaskHints): Int {
+        var s = 0
+        if (src.isConfigured()) s += 10
+        if (src.info.kind == SourceKind.WEB_SESSION || src.info.kind == SourceKind.WEB) s += 5
+        if (src.info.kind == SourceKind.MCP) s += 3
+        if (hints.coding && src.info.capabilities.coding) s += 4
+        if (hints.research && src.info.capabilities.research) s += 4
+        return s
     }
+
+    private fun estimateTokens(user: String, reply: String): Int =
+        ((user.length + reply.length) / 4).coerceAtLeast(1)
 }

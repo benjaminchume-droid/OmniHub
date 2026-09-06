@@ -1,8 +1,7 @@
 {
-  "name": "Omni Store",
-  "repo": "benjaminchume-droid/OmniHub-Sources",
-  "repoUrl": "https://github.com/benjaminchume-droid/OmniHub-Sources",
+  "name": "OmniSource Store",
+  "repo": "OmniSource",
   "catalogUrl": "https://raw.githubusercontent.com/benjaminchume-droid/OmniHub-Sources/main/catalog/index.min.json",
   "releasesUrl": "https://api.github.com/repos/benjaminchume-droid/OmniHub-Sources/releases",
-  "minOmniHubVersion": "1.0.2"
+  "minOmniHubVersion": "1.0.3"
 }
