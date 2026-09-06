@@ -2,8 +2,13 @@ package com.omnihub.source.core
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.graphics.PixelFormat
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.view.Gravity
+import android.view.ViewGroup
+import android.view.WindowManager
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
@@ -12,9 +17,8 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 
 /**
- * Universal WebCore send path.
- * Types text with human-like InputEvents, then clicks Send or presses Enter.
- * Extracts only the assistant reply (not page chrome).
+ * WebCore: attached WebView + human-like type + spatial Send sensing + multi-strategy submit.
+ * Verifies the message left the input before waiting for a reply.
  */
 object WebViewChatEngine {
 
@@ -48,19 +52,53 @@ object WebViewChatEngine {
         timeoutMs: Long = 120_000L
     ): Result = suspendCancellableCoroutine { cont ->
         val main = Handler(Looper.getMainLooper())
+        val appCtx = context.applicationContext
+
         main.post {
             @SuppressLint("SetJavaScriptEnabled")
-            val web = WebView(context.applicationContext)
+            val web = WebView(appCtx)
             var finished = false
+            var attached = false
+            val wm = appCtx.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+
+            fun detach() {
+                if (!attached) return
+                try {
+                    wm.removeView(web)
+                } catch (_: Exception) {
+                }
+                attached = false
+            }
+
             fun complete(text: String, ok: Boolean) {
                 if (finished) return
                 finished = true
                 try {
                     web.stopLoading()
+                    detach()
                     web.destroy()
                 } catch (_: Exception) {
                 }
                 if (cont.isActive) cont.resume(Result(text, ok))
+            }
+
+            // Attach with real size so layout/clicks work (detached WebViews often never enable Send)
+            try {
+                val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                else
+                    @Suppress("DEPRECATION")
+                    WindowManager.LayoutParams.TYPE_PHONE
+
+                // Prefer attach without overlay permission: use a tiny in-process approach via
+                // application token-less params fails on modern Android. Fallback: measure with layout.
+                web.layoutParams = ViewGroup.LayoutParams(1080, 1920)
+                web.measure(
+                    android.view.View.MeasureSpec.makeMeasureSpec(1080, android.view.View.MeasureSpec.EXACTLY),
+                    android.view.View.MeasureSpec.makeMeasureSpec(1920, android.view.View.MeasureSpec.EXACTLY)
+                )
+                web.layout(0, 0, 1080, 1920)
+            } catch (_: Exception) {
             }
 
             val bridge = object {
@@ -92,26 +130,37 @@ object WebViewChatEngine {
             web.settings.javaScriptEnabled = true
             web.settings.domStorageEnabled = true
             web.settings.databaseEnabled = true
+            web.settings.loadsImagesAutomatically = true
             web.settings.userAgentString =
                 "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Mobile Safari/537.36"
             web.addJavascriptInterface(bridge, "OmniBridge")
 
+            var injected = false
             web.webViewClient = object : WebViewClient() {
                 override fun onPageFinished(view: WebView?, url: String?) {
-                    main.postDelayed({
-                        view?.evaluateJavascript(buildHumanTypeScript(userMessage), null)
-                    }, 3500)
+                    if (injected) return
+                    // Poll until composer exists, then inject once
+                    fun tryInject(attempt: Int) {
+                        if (finished || injected) return
+                        view?.evaluateJavascript(
+                            "(function(){var n=document.querySelectorAll('textarea,[contenteditable=true],div[role=textbox]');return ''+n.length;})();"
+                        ) { countStr ->
+                            val n = countStr?.replace("\"", "")?.toIntOrNull() ?: 0
+                            if (n > 0 || attempt >= 12) {
+                                if (injected || finished) return@evaluateJavascript
+                                injected = true
+                                view.evaluateJavascript(buildSubmitScript(userMessage), null)
+                            } else {
+                                main.postDelayed({ tryInject(attempt + 1) }, 800)
+                            }
+                        }
+                    }
+                    main.postDelayed({ tryInject(0) }, 1500)
                 }
             }
 
             cont.invokeOnCancellation {
-                main.post {
-                    try {
-                        web.stopLoading()
-                        web.destroy()
-                    } catch (_: Exception) {
-                    }
-                }
+                main.post { complete("Cancelled", false) }
             }
 
             main.postDelayed({
@@ -125,13 +174,8 @@ object WebViewChatEngine {
         }
     }
 
-    /**
-     * Human-like typing + Send/Enter.
-     * Uses JSON.stringify for the message to avoid Kotlin/JS escape bugs.
-     */
-    private fun buildHumanTypeScript(message: String): String {
+    private fun buildSubmitScript(message: String): String {
         val jsonMsg = org.json.JSONObject.quote(message)
-        // language=javascript
         return """
 (function(){
   var MSG = $jsonMsg;
@@ -141,258 +185,264 @@ object WebViewChatEngine {
   function visible(el){
     if(!el) return false;
     var r = el.getBoundingClientRect();
-    if(r.width < 8 || r.height < 8) return false;
+    if(r.width < 4 || r.height < 4) return false;
     var st = window.getComputedStyle(el);
-    if(st.display==='none' || st.visibility==='hidden' || st.opacity==='0') return false;
-    return r.bottom > 0 && r.top < (window.innerHeight||800);
+    if(st.display==='none' || st.visibility==='hidden' || parseFloat(st.opacity||'1')===0) return false;
+    return true;
   }
 
   function scoreInput(el){
-    var s = 0;
-    var r = el.getBoundingClientRect();
+    var s = 0, r = el.getBoundingClientRect();
     var tag = (el.tagName||'').toLowerCase();
-    var ph = ((el.getAttribute('placeholder')||'')+' '+(el.getAttribute('aria-label')||'')+' '+(el.getAttribute('data-testid')||'')+' '+(el.id||'')).toLowerCase();
-    if(tag==='textarea') s += 30;
-    if(el.isContentEditable || el.getAttribute('contenteditable')==='true') s += 28;
-    if(tag==='input' && (el.type==='text'||el.type==='search'||!el.type)) s += 12;
-    if(r.width > 180) s += 15;
-    if(r.height > 24) s += 8;
-    if(r.top > (window.innerHeight||800)*0.45) s += 20;
-    if(/message|ask|prompt|chat|send a|type|write|talk/.test(ph)) s += 25;
-    if(/search|email|password|user/.test(ph)) s -= 40;
+    var ph = ((el.getAttribute('placeholder')||'')+' '+(el.getAttribute('aria-label')||'')+' '+(el.getAttribute('data-testid')||'')+' '+(el.id||'')+' '+(el.className||'')).toLowerCase();
+    if(tag==='textarea') s += 35;
+    if(el.isContentEditable || el.getAttribute('contenteditable')==='true') s += 32;
+    if(el.getAttribute('role')==='textbox') s += 30;
+    if(/prompt-textarea|composer|chat-input/.test(ph)) s += 40;
+    if(r.width > 160) s += 15;
+    if(r.top > (window.innerHeight||800)*0.4) s += 20;
+    if(/message|ask|prompt|chat|send a|type|write/.test(ph)) s += 20;
+    if(/search|email|password/.test(ph)) s -= 50;
     if(!visible(el)) s -= 100;
-    if(el.disabled || el.readOnly) s -= 50;
+    if(el.disabled) s -= 50;
     return s;
   }
 
   function findInput(){
     var nodes = Array.prototype.slice.call(document.querySelectorAll(
-      'textarea, [contenteditable="true"], div[role="textbox"], input[type="text"], input:not([type]), input[type="search"]'
+      'textarea, [contenteditable="true"], div[role="textbox"], p[data-placeholder], input[type="text"], input:not([type])'
     ));
-    var best = null, bestScore = -999;
+    var best=null, bestScore=-999;
     nodes.forEach(function(el){
-      var sc = scoreInput(el);
-      if(sc > bestScore){ bestScore = sc; best = el; }
+      var sc=scoreInput(el);
+      if(sc>bestScore){ bestScore=sc; best=el; }
     });
-    return (best && bestScore >= 20) ? best : null;
+    return (best && bestScore>=15) ? best : null;
   }
 
-  function scoreSend(btn, inputRect){
-    var s = 0;
-    var r = btn.getBoundingClientRect();
-    var label = ((btn.getAttribute('aria-label')||'')+' '+(btn.innerText||'')+' '+(btn.getAttribute('data-testid')||'')+' '+(btn.getAttribute('title')||'')+' '+(btn.className||'')).toLowerCase();
-    if(/send|submit|arrow|reply|paper-airplane/.test(label)) s += 40;
-    if(btn.tagName==='BUTTON') s += 10;
-    if(btn.getAttribute('type')==='submit') s += 15;
-    if(inputRect){
-      var dy = Math.abs((r.top+r.bottom)/2 - (inputRect.top+inputRect.bottom)/2);
-      var dx = Math.abs((r.left+r.right)/2 - (inputRect.left+inputRect.right)/2);
-      if(dy < 100 && dx < 480) s += 25;
-      if(r.left >= inputRect.right - 40) s += 12;
+  /** Spatial: nearest clickable to the RIGHT / same row as input */
+  function findSendSpatial(input){
+    var ir = input.getBoundingClientRect();
+    var cx = ir.right, cy = (ir.top+ir.bottom)/2;
+    var candidates = Array.prototype.slice.call(document.querySelectorAll(
+      'button, [role="button"], input[type="submit"], a, div[tabindex], span[tabindex], [data-testid*="send"], [aria-label*="Send" i], [aria-label*="submit" i]'
+    ));
+    var best=null, bestScore=-1e9;
+    candidates.forEach(function(el){
+      if(!visible(el)) return;
+      var r = el.getBoundingClientRect();
+      if(r.width<8 || r.height<8 || r.width>200 || r.height>80) return;
+      var ex = (r.left+r.right)/2, ey = (r.top+r.bottom)/2;
+      var dx = ex - cx, dy = Math.abs(ey - cy);
+      var label = ((el.getAttribute('aria-label')||'')+' '+(el.getAttribute('data-testid')||'')+' '+(el.getAttribute('title')||'')+' '+(el.className||'')+' '+(el.innerText||'')).toLowerCase();
+      var score = 0;
+      // prefer to the right of input, same vertical band
+      if(dx >= -20 && dx < 280) score += 80 - dx*0.15;
+      else score -= Math.abs(dx)*0.2;
+      score -= dy * 0.8;
+      if(/send|submit|arrow|paper|airplane|reply/.test(label)) score += 60;
+      if(/stop|cancel|attach|upload|mic|voice|image|file|plus|menu/.test(label)) score -= 80;
+      if(el.disabled || el.getAttribute('aria-disabled')==='true') score -= 15;
+      if(el.closest && el.closest('form')) score += 10;
+      // SVG path buttons (icon-only send)
+      if(el.querySelector && el.querySelector('svg')) score += 8;
+      if(score > bestScore){ bestScore = score; best = el; }
+    });
+    return bestScore > 20 ? best : null;
+  }
+
+  function findSendByAttr(){
+    var sels = [
+      '[data-testid="send-button"]',
+      '[data-testid*="send"]',
+      'button[aria-label*="Send" i]',
+      'button[aria-label*="提交"]',
+      'button[type="submit"]',
+      'button.send-button',
+      '[class*="send"] button',
+      'form button[type="submit"]'
+    ];
+    for(var i=0;i<sels.length;i++){
+      try {
+        var el = document.querySelector(sels[i]);
+        if(el && visible(el)) return el;
+      } catch(e){}
     }
-    if(r.top > (window.innerHeight||800)*0.5) s += 10;
-    if(!visible(btn)) s -= 100;
-    // do not heavily penalize disabled — we re-check after typing
-    if(btn.disabled) s -= 5;
-    return s;
-  }
-
-  function findSend(input){
-    var inputRect = input ? input.getBoundingClientRect() : null;
-    var nodes = Array.prototype.slice.call(document.querySelectorAll(
-      'button, [role="button"], input[type="submit"], [data-testid*="send"]'
-    ));
-    var best = null, bestScore = -999;
-    nodes.forEach(function(el){
-      var sc = scoreSend(el, inputRect);
-      if(sc > bestScore){ bestScore = sc; best = el; }
-    });
-    return (best && bestScore >= 25) ? best : null;
+    return null;
   }
 
   function isChromeLine(t){
-    t = (t||'').trim();
+    t=(t||'').trim();
     if(!t) return true;
     return /^(chat|agent|new chat|sign in|sign up|log in|api|terms of service|privacy policy|deep think|max|generated by ai\.?|for reference only\.?|glm[-\d.a-z]+|what can i build for you\??|menu|settings|home|upgrade|subscribe)$/i.test(t);
   }
-
   function cleanText(t){
-    return (t||'').split(/\n+/).map(function(l){ return l.trim(); })
-      .filter(function(l){ return l && !isChromeLine(l); })
-      .join('\n').trim();
+    return (t||'').split(/\n+/).map(function(l){return l.trim();})
+      .filter(function(l){return l && !isChromeLine(l);}).join('\n').trim();
   }
-
   function lastAssistantText(){
-    var sels = [
-      '[data-message-author-role="assistant"]',
-      '[data-role="assistant"]',
-      '[data-testid*="assistant"]',
-      '.markdown.prose',
-      '.prose',
-      'article'
-    ];
-    for (var s = 0; s < sels.length; s++) {
-      var nodes = document.querySelectorAll(sels[s]);
-      if (!nodes || !nodes.length) continue;
-      for (var i = nodes.length - 1; i >= 0; i--) {
-        var raw = (nodes[i].innerText || nodes[i].textContent || '').trim();
-        var c = cleanText(raw);
-        if (c.length > 2 && c.toLowerCase().indexOf((MSG||'').toLowerCase()) !== 0) return c;
+    var sels = ['[data-message-author-role="assistant"]','[data-role="assistant"]','[data-testid*="assistant"]','.markdown.prose','.prose','article','.message-content','.chat-message'];
+    for(var s=0;s<sels.length;s++){
+      var nodes=document.querySelectorAll(sels[s]);
+      if(!nodes||!nodes.length) continue;
+      for(var i=nodes.length-1;i>=0;i--){
+        var c=cleanText(nodes[i].innerText||nodes[i].textContent||'');
+        if(c.length>2 && c.toLowerCase().indexOf((MSG||'').toLowerCase())!==0) return c;
       }
     }
     return '';
   }
 
-  function fireKey(el, type, key, code, keyCode){
-    var ev;
-    try {
-      ev = new KeyboardEvent(type, {
-        key: key, code: code, keyCode: keyCode, which: keyCode,
-        bubbles: true, cancelable: true, composed: true
-      });
-    } catch(e) {
-      ev = document.createEvent('Event');
-      ev.initEvent(type, true, true);
-    }
-    el.dispatchEvent(ev);
+  function fireKey(el,type,key,code,keyCode){
+    try{
+      el.dispatchEvent(new KeyboardEvent(type,{key:key,code:code,keyCode:keyCode,which:keyCode,bubbles:true,cancelable:true,composed:true}));
+    }catch(e){}
+  }
+  function firePointer(el){
+    var types=['pointerdown','mousedown','pointerup','mouseup','click'];
+    types.forEach(function(t){
+      try{
+        var C = t.indexOf('pointer')===0 ? PointerEvent : MouseEvent;
+        el.dispatchEvent(new C(t,{bubbles:true,cancelable:true,view:window,buttons:1,clientX:0,clientY:0}));
+      }catch(e){
+        try{ el.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,view:window})); }catch(e2){}
+      }
+    });
   }
 
-  function fireInput(el, data, inputType){
-    try {
-      el.dispatchEvent(new InputEvent('input', {
-        bubbles: true, cancelable: true, composed: true,
-        data: data, inputType: inputType || 'insertText'
-      }));
-    } catch(e) {
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-    }
+  function readInputValue(el){
+    if(!el) return '';
+    if(el.isContentEditable || el.getAttribute('contenteditable')==='true')
+      return (el.innerText||el.textContent||'').trim();
+    return (el.value||'').trim();
   }
 
-  /** Clear then type character-by-character so React enables Send */
-  function typeHuman(el, text, done){
+  function fillAll(el, text){
     el.focus();
-    try { el.click(); } catch(e) {}
-
-    var isEditable = el.isContentEditable || el.getAttribute('contenteditable') === 'true';
-
-    // select-all + delete to clear
-    try {
-      if (isEditable) {
+    try{ el.click(); }catch(e){}
+    var isEd = el.isContentEditable || el.getAttribute('contenteditable')==='true' || el.getAttribute('role')==='textbox';
+    try{
+      if(isEd){
+        // ProseMirror / contenteditable path
         document.execCommand('selectAll', false, null);
         document.execCommand('delete', false, null);
-      } else {
-        el.select && el.select();
-        var proto = el.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
-        var desc = Object.getOwnPropertyDescriptor(proto, 'value');
-        if (desc && desc.set) desc.set.call(el, '');
-        else el.value = '';
-        fireInput(el, '', 'deleteContentBackward');
-      }
-    } catch(e) {}
-
-    var i = 0;
-    function step(){
-      if (i >= text.length) {
-        fireInput(el, text, 'insertText');
-        el.dispatchEvent(new Event('change', { bubbles: true }));
-        done();
-        return;
-      }
-      var ch = text.charAt(i);
-      i++;
-      fireKey(el, 'keydown', ch, ch, ch.charCodeAt(0));
-      try {
-        if (isEditable) {
-          document.execCommand('insertText', false, ch);
-        } else {
-          var proto2 = el.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
-          var desc2 = Object.getOwnPropertyDescriptor(proto2, 'value');
-          var next = (el.value || '') + ch;
-          if (desc2 && desc2.set) desc2.set.call(el, next);
-          else el.value = next;
+        // beforeinput + insertText is what many editors listen for
+        try{
+          el.dispatchEvent(new InputEvent('beforeinput',{bubbles:true,cancelable:true,inputType:'insertText',data:text}));
+        }catch(e){}
+        var okIns = false;
+        try{ okIns = document.execCommand('insertText', false, text); }catch(e){}
+        if(!okIns){
+          el.textContent = text;
+          try{
+            el.dispatchEvent(new InputEvent('input',{bubbles:true,data:text,inputType:'insertText'}));
+          }catch(e){ el.dispatchEvent(new Event('input',{bubbles:true})); }
         }
-      } catch(e) {
-        try { document.execCommand('insertText', false, ch); } catch(e2) {}
+      } else {
+        var proto = el.tagName==='TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+        var desc = Object.getOwnPropertyDescriptor(proto,'value');
+        if(desc && desc.set) desc.set.call(el, text); else el.value = text;
+        try{
+          el.dispatchEvent(new InputEvent('input',{bubbles:true,data:text,inputType:'insertText'}));
+        }catch(e){ el.dispatchEvent(new Event('input',{bubbles:true})); }
+        el.dispatchEvent(new Event('change',{bubbles:true}));
       }
-      fireInput(el, ch, 'insertText');
-      fireKey(el, 'keypress', ch, ch, ch.charCodeAt(0));
-      fireKey(el, 'keyup', ch, ch, ch.charCodeAt(0));
-      // batch slightly for long messages (still event-driven)
-      if (i % 8 === 0) setTimeout(step, 0);
-      else step();
-    }
-    step();
+    }catch(e){}
   }
 
-  function pressEnter(el){
-    fireKey(el, 'keydown', 'Enter', 'Enter', 13);
-    fireKey(el, 'keypress', 'Enter', 'Enter', 13);
-    fireKey(el, 'keyup', 'Enter', 'Enter', 13);
-  }
-
-  function clickSend(btn){
-    if (!btn) return false;
-    try {
-      btn.removeAttribute('disabled');
-      btn.disabled = false;
-    } catch(e) {}
-    try {
-      btn.focus();
-      btn.click();
-      return true;
-    } catch(e) {
-      try {
-        btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
-        return true;
-      } catch(e2) { return false; }
+  function trySubmit(input){
+    var attempts = [];
+    // 1) attribute selectors
+    var byAttr = findSendByAttr();
+    if(byAttr){ attempts.push(byAttr); }
+    // 2) spatial nearest
+    var bySpace = findSendSpatial(input);
+    if(bySpace && attempts.indexOf(bySpace)<0) attempts.push(bySpace);
+    // 3) form submit
+    var form = input.closest && input.closest('form');
+    if(form){
+      try{
+        if(typeof form.requestSubmit==='function'){ form.requestSubmit(); return true; }
+      }catch(e){}
+      try{ form.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})); return true; }catch(e){}
     }
+    // 4) click each candidate with full pointer sequence
+    for(var i=0;i<attempts.length;i++){
+      var btn = attempts[i];
+      try{
+        btn.removeAttribute('disabled');
+        btn.setAttribute('aria-disabled','false');
+        btn.disabled = false;
+      }catch(e){}
+      try{ firePointer(btn); }catch(e){}
+      try{ btn.click(); }catch(e){}
+    }
+    // 5) Enter key (with and without shift)
+    fireKey(input,'keydown','Enter','Enter',13);
+    fireKey(input,'keypress','Enter','Enter',13);
+    fireKey(input,'keyup','Enter','Enter',13);
+    // Ctrl/Cmd+Enter used by some UIs
+    try{
+      input.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true,ctrlKey:true}));
+    }catch(e){}
+    return attempts.length > 0;
   }
 
   var input = findInput();
-  if (!input) {
+  if(!input){
     fail('No chat input found. Sign in and open an active chat thread first.');
     return;
   }
 
   var beforeAssist = lastAssistantText();
+  fillAll(input, MSG);
 
-  typeHuman(input, MSG, function(){
+  // Wait for React to enable Send, then submit hard
+  setTimeout(function(){
+    trySubmit(input);
     setTimeout(function(){
-      var btn = findSend(input);
-      var sent = false;
-      if (btn) sent = clickSend(btn);
-      if (!sent) pressEnter(input);
-      // second pass: some UIs enable Send one frame later
-      setTimeout(function(){
-        var btn2 = findSend(input);
-        if (btn2 && !btn2.disabled) clickSend(btn2);
-        else pressEnter(input);
-      }, 200);
+      // If text still sitting in the box, force another round
+      var still = readInputValue(input);
+      if(still && still.indexOf(MSG.slice(0, Math.min(12, MSG.length))) >= 0){
+        trySubmit(input);
+        // last resort: parent walk for any clickable near input
+        var p = input.parentElement;
+        for(var d=0; d<5 && p; d++){
+          var btns = p.querySelectorAll('button, [role="button"]');
+          for(var b=0;b<btns.length;b++){
+            var lab = ((btns[b].getAttribute('aria-label')||'')+(btns[b].innerText||'')).toLowerCase();
+            if(/stop|attach|upload|mic/.test(lab)) continue;
+            try{ firePointer(btns[b]); btns[b].click(); }catch(e){}
+          }
+          p = p.parentElement;
+        }
+      }
 
-      var stable = 0, last = '', tries = 0;
-      var timer = setInterval(function(){
+      var stable=0, last='', tries=0;
+      var timer=setInterval(function(){
         tries++;
-        var cur = lastAssistantText();
-        if (cur && cur !== beforeAssist && cur.length > 2) {
-          if (cur === last) {
+        var cur=lastAssistantText();
+        if(cur && cur!==beforeAssist && cur.length>2){
+          if(cur===last){
             stable++;
-            if (stable >= 3) {
-              clearInterval(timer);
-              ok(cur);
-            }
-          } else {
-            stable = 0;
-            last = cur;
+            if(stable>=3){ clearInterval(timer); ok(cur); }
+          } else { stable=0; last=cur; }
+        }
+        // also: if input cleared, message likely sent — keep waiting for reply
+        if(tries>120){
+          clearInterval(timer);
+          if(last&&last.length>2) ok(last);
+          else {
+            var left = readInputValue(input);
+            if(left && left.length>0)
+              fail('Message still in the input — Send was not accepted by the page. Re-sign in on the chat screen and retry.');
+            else
+              fail('Message may have sent but no assistant reply was detected.');
           }
         }
-        if (tries > 110) {
-          clearInterval(timer);
-          if (last && last.length > 2) ok(last);
-          else fail('No assistant reply detected. Stay signed in on the chat page and retry.');
-        }
       }, 700);
-    }, 120);
-  });
+    }, 400);
+  }, 300);
 })();
         """.trimIndent()
     }
