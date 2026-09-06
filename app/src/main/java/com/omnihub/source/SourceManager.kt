@@ -1,21 +1,28 @@
 package com.omnihub.source
 
 import android.content.Context
-import com.omnihub.source.bundled.WebProviderSource
+import com.omnihub.source.extension.InstalledSourceScanner
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
+/**
+ * Providers list = only packages the user installed from Store.
+ * No hardcoded built-in provider list in the UI.
+ */
 class SourceManager(private val context: Context) {
     private val _sources = MutableStateFlow<List<AiSource>>(emptyList())
     val sources: StateFlow<List<AiSource>> = _sources.asStateFlow()
     private val installedDescriptors = mutableListOf<AiSource>()
-    private val installedExtensions = mutableListOf<AiSource>()
 
     init { reload() }
 
     fun reload() {
-        _sources.value = buildBundled() + installedDescriptors + installedExtensions
+        val fromApks = InstalledSourceScanner.toSources(context)
+        // Prefer APK-installed; merge descriptors without duplicates
+        val ids = fromApks.map { it.info.id }.toSet()
+        val extra = installedDescriptors.filter { it.info.id !in ids }
+        _sources.value = fromApks + extra
     }
 
     fun all(): List<AiSource> = _sources.value
@@ -31,30 +38,13 @@ class SourceManager(private val context: Context) {
     }
 
     fun registerExtension(source: AiSource) {
-        installedExtensions.removeAll { it.info.id == source.info.id }
-        installedExtensions.add(source)
+        installedDescriptors.removeAll { it.info.id == source.info.id }
+        installedDescriptors.add(source)
         reload()
     }
 
     fun uninstall(id: String) {
         installedDescriptors.removeAll { it.info.id == id }
-        installedExtensions.removeAll { it.info.id == id }
         reload()
     }
-
-    private fun buildBundled(): List<AiSource> = listOf(
-        web("chatgpt", "ChatGPT", "https://chatgpt.com"),
-        web("claude", "Claude", "https://claude.ai"),
-        web("gemini", "Gemini", "https://gemini.google.com"),
-        web("perplexity", "Perplexity", "https://www.perplexity.ai"),
-        web("deepseek", "DeepSeek", "https://chat.deepseek.com"),
-        web("grok", "Grok", "https://x.com/i/grok"),
-        web("groq", "Groq", "https://chat.groq.com"),
-        web("hy3", "Hy3", "https://hy3.ai"),
-        web("kimi", "Kimi", "https://kimi.moonshot.cn"),
-        web("zai", "Z.AI", "https://chat.z.ai")
-    )
-
-    private fun web(id: String, name: String, url: String): AiSource =
-        WebProviderSource(context, id, name, url, "Built-in Web Core")
 }
