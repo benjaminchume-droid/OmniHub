@@ -23,15 +23,31 @@ class SoulManager(context: Context) {
         Log.d(TAG, "Custom storage path requested: $path")
     }
 
+    private fun isJunk(text: String): Boolean {
+        val t = text.lowercase()
+        return t.contains("relayed to") ||
+            t.contains("streaming back") ||
+            t.contains("your message was delivered") ||
+            t.contains("sign in to") ||
+            t.contains("open providers") ||
+            t.contains("session ok") ||
+            t.contains("install the") ||
+            t.contains("api key") ||
+            t.contains("cookie") ||
+            t.startsWith("[") && t.contains("] relayed")
+    }
+
     suspend fun learnFromExchange(
         sourceId: String,
         messages: List<ChatMessage>,
         assistantReply: String,
         conversationId: String?
     ) = withContext(Dispatchers.Default) {
-        val convId = conversationId ?: UUID.randomUUID().toString()
+        if (assistantReply.isBlank() || isJunk(assistantReply)) return@withContext
         val userText = messages.lastOrNull { it.role == "user" }?.content.orEmpty()
-        val topic = extractTopic(userText.ifBlank { assistantReply })
+        if (userText.isBlank()) return@withContext
+        val convId = conversationId ?: UUID.randomUUID().toString()
+        val topic = extractTopic(userText)
         val unit = SoulUnit(
             id = "soul-${UUID.randomUUID()}",
             type = SoulType.CONVERSATION,
@@ -39,7 +55,7 @@ class SoulManager(context: Context) {
             sourceId = sourceId,
             conversationId = convId,
             topic = topic,
-            summary = assistantReply.take(400),
+            summary = assistantReply.take(200),
             keyFacts = extractFacts(userText + "\n" + assistantReply),
             tags = extractTags(userText + " " + assistantReply),
             importance = 0.6,
@@ -65,12 +81,15 @@ class SoulManager(context: Context) {
 
     suspend fun generatePromptContext(maxUnits: Int = 5): String = withContext(Dispatchers.Default) {
         synchronized(soulUnits) {
-            val recent = soulUnits.sortedByDescending { it.importance * it.createdAt }.take(maxUnits)
+            val recent = soulUnits
+                .filter { !isJunk(it.summary) && !isJunk(it.content) }
+                .sortedByDescending { it.importance * it.createdAt }
+                .take(maxUnits)
             if (recent.isEmpty()) return@withContext ""
             buildString {
-                append("## Omni memory (relevant units only)\n")
+                append("## Omni memory\n")
                 recent.forEach { u ->
-                    append("- [${u.type}] ${u.topic.ifBlank { u.summary.take(40) }}: ${u.summary.take(180)}\n")
+                    append("- ${u.topic.ifBlank { u.summary.take(40) }}: ${u.summary.take(120)}\n")
                 }
             }
         }
@@ -78,7 +97,9 @@ class SoulManager(context: Context) {
 
     fun unitCount(): Int = synchronized(soulUnits) { soulUnits.size }
 
-    fun loadUnits(): List<SoulUnit> = synchronized(soulUnits) { soulUnits.toList() }
+    fun loadUnits(): List<SoulUnit> = synchronized(soulUnits) {
+        soulUnits.filter { !isJunk(it.summary) && !isJunk(it.content) }
+    }
 
     private fun load() {
         try {
@@ -86,21 +107,26 @@ class SoulManager(context: Context) {
                 val arr = JSONArray(unitsFile.readText())
                 for (i in 0 until arr.length()) {
                     val o = arr.getJSONObject(i)
+                    val summary = o.optString("summary")
+                    val content = o.optString("content")
+                    if (isJunk(summary) || isJunk(content)) continue
                     soulUnits.add(
                         SoulUnit(
                             id = o.optString("id"),
                             type = runCatching { SoulType.valueOf(o.optString("type", "CONVERSATION")) }.getOrDefault(SoulType.CONVERSATION),
-                            content = o.optString("content"),
+                            content = content,
                             sourceId = o.optString("sourceId"),
                             conversationId = o.optString("conversationId"),
                             topic = o.optString("topic"),
-                            summary = o.optString("summary"),
+                            summary = summary,
                             importance = o.optDouble("importance", 0.5),
                             createdAt = o.optLong("createdAt", System.currentTimeMillis()),
                             tags = o.optJSONArray("tags")?.let { a -> (0 until a.length()).map { a.getString(it) } } ?: emptyList()
                         )
                     )
                 }
+                // Rewrite clean file if we dropped junk
+                persist()
             }
         } catch (e: Exception) {
             Log.w(TAG, "load failed: ${e.message}")
@@ -110,7 +136,7 @@ class SoulManager(context: Context) {
     private fun persist() {
         try {
             val arr = JSONArray()
-            soulUnits.forEach { u ->
+            soulUnits.filter { !isJunk(it.summary) }.forEach { u ->
                 arr.put(
                     JSONObject()
                         .put("id", u.id)
@@ -128,10 +154,8 @@ class SoulManager(context: Context) {
             unitsFile.writeText(arr.toString())
             val md = buildString {
                 append("# Omni Soul\n\n")
-                append("_Auto-generated memory projection. Runtime uses indexed units._\n\n")
-                soulUnits.sortedByDescending { it.createdAt }.take(40).forEach { u ->
+                soulUnits.filter { !isJunk(it.summary) }.sortedByDescending { it.createdAt }.take(40).forEach { u ->
                     append("## ${u.topic.ifBlank { u.type.name }}\n")
-                    append("- source: ${u.sourceId}\n")
                     append("- ${u.summary}\n\n")
                 }
             }
@@ -147,10 +171,10 @@ class SoulManager(context: Context) {
     }
 
     private fun extractFacts(text: String): List<String> =
-        text.lines().map { it.trim() }.filter { it.length in 20..160 }.take(5)
+        text.lines().map { it.trim() }.filter { it.length in 20..160 && !isJunk(it) }.take(5)
 
     private fun extractTags(text: String): List<String> {
-        val keywords = listOf("android", "kotlin", "omnihub", "code", "design", "api", "source", "memory")
+        val keywords = listOf("android", "kotlin", "omnihub", "code", "design", "source", "memory")
         val lower = text.lowercase()
         return keywords.filter { it in lower }.take(6)
     }
