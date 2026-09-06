@@ -2,13 +2,9 @@ package com.omnihub.source.core
 
 import android.annotation.SuppressLint
 import android.content.Context
-import android.graphics.PixelFormat
-import android.os.Build
 import android.os.Handler
 import android.os.Looper
-import android.view.Gravity
 import android.view.ViewGroup
-import android.view.WindowManager
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
@@ -17,8 +13,10 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 
 /**
- * WebCore: attached WebView + human-like type + spatial Send sensing + multi-strategy submit.
- * Verifies the message left the input before waiting for a reply.
+ * WebCore with interaction learning:
+ * 1) try remembered input/send selectors
+ * 2) else spatial + attr sensing + Enter
+ * 3) on success, store selectors for next time
  */
 object WebViewChatEngine {
 
@@ -49,49 +47,30 @@ object WebViewChatEngine {
         siteUrl: String,
         providerId: String,
         userMessage: String,
-        timeoutMs: Long = 120_000L
+        timeoutMs: Long = 150_000L
     ): Result = suspendCancellableCoroutine { cont ->
         val main = Handler(Looper.getMainLooper())
         val appCtx = context.applicationContext
+        val learnedIn = InteractionMemory.inputSelector(appCtx, providerId).orEmpty()
+        val learnedSend = InteractionMemory.sendSelector(appCtx, providerId).orEmpty()
 
         main.post {
             @SuppressLint("SetJavaScriptEnabled")
             val web = WebView(appCtx)
             var finished = false
-            var attached = false
-            val wm = appCtx.getSystemService(Context.WINDOW_SERVICE) as WindowManager
-
-            fun detach() {
-                if (!attached) return
-                try {
-                    wm.removeView(web)
-                } catch (_: Exception) {
-                }
-                attached = false
-            }
 
             fun complete(text: String, ok: Boolean) {
                 if (finished) return
                 finished = true
                 try {
                     web.stopLoading()
-                    detach()
                     web.destroy()
                 } catch (_: Exception) {
                 }
                 if (cont.isActive) cont.resume(Result(text, ok))
             }
 
-            // Attach with real size so layout/clicks work (detached WebViews often never enable Send)
             try {
-                val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
-                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-                else
-                    @Suppress("DEPRECATION")
-                    WindowManager.LayoutParams.TYPE_PHONE
-
-                // Prefer attach without overlay permission: use a tiny in-process approach via
-                // application token-less params fails on modern Android. Fallback: measure with layout.
                 web.layoutParams = ViewGroup.LayoutParams(1080, 1920)
                 web.measure(
                     android.view.View.MeasureSpec.makeMeasureSpec(1080, android.view.View.MeasureSpec.EXACTLY),
@@ -122,6 +101,13 @@ object WebViewChatEngine {
                         }
                     }
                 }
+
+                @JavascriptInterface
+                fun onLearn(inputSel: String?, sendSel: String?) {
+                    main.post {
+                        InteractionMemory.remember(appCtx, providerId, inputSel, sendSel)
+                    }
+                }
             }
 
             CookieManager.getInstance().setAcceptCookie(true)
@@ -139,23 +125,26 @@ object WebViewChatEngine {
             web.webViewClient = object : WebViewClient() {
                 override fun onPageFinished(view: WebView?, url: String?) {
                     if (injected) return
-                    // Poll until composer exists, then inject once
                     fun tryInject(attempt: Int) {
                         if (finished || injected) return
                         view?.evaluateJavascript(
-                            "(function(){var n=document.querySelectorAll('textarea,[contenteditable=true],div[role=textbox]');return ''+n.length;})();"
+                            "(function(){var n=document.querySelectorAll('textarea,[contenteditable=true],div[role=textbox],#prompt-textarea');return ''+n.length;})();"
                         ) { countStr ->
                             val n = countStr?.replace("\"", "")?.toIntOrNull() ?: 0
-                            if (n > 0 || attempt >= 12) {
+                            // Wait longer for SPA (up to ~25s)
+                            if (n > 0 || attempt >= 30) {
                                 if (injected || finished) return@evaluateJavascript
                                 injected = true
-                                view.evaluateJavascript(buildSubmitScript(userMessage), null)
+                                view.evaluateJavascript(
+                                    buildSubmitScript(userMessage, learnedIn, learnedSend),
+                                    null
+                                )
                             } else {
                                 main.postDelayed({ tryInject(attempt + 1) }, 800)
                             }
                         }
                     }
-                    main.postDelayed({ tryInject(0) }, 1500)
+                    main.postDelayed({ tryInject(0) }, 2000)
                 }
             }
 
@@ -164,7 +153,10 @@ object WebViewChatEngine {
             }
 
             main.postDelayed({
-                complete("Timed out waiting for reply on page.", false)
+                complete(
+                    "Timed out. Sign in on the provider chat page, leave the thread open, then retry.",
+                    false
+                )
             }, timeoutMs)
 
             val target = siteUrl.ifBlank {
@@ -174,13 +166,22 @@ object WebViewChatEngine {
         }
     }
 
-    private fun buildSubmitScript(message: String): String {
+    private fun buildSubmitScript(
+        message: String,
+        learnedIn: String,
+        learnedSend: String
+    ): String {
         val jsonMsg = org.json.JSONObject.quote(message)
+        val jsonIn = org.json.JSONObject.quote(learnedIn)
+        val jsonSend = org.json.JSONObject.quote(learnedSend)
         return """
 (function(){
   var MSG = $jsonMsg;
+  var LEARNED_IN = $jsonIn;
+  var LEARNED_SEND = $jsonSend;
   function fail(t){ try{ OmniBridge.onReply('ERR:'+t); }catch(e){} }
   function ok(t){ try{ OmniBridge.onReply(t); }catch(e){} }
+  function learn(i,s){ try{ OmniBridge.onLearn(i||'', s||''); }catch(e){} }
 
   function visible(el){
     if(!el) return false;
@@ -189,6 +190,31 @@ object WebViewChatEngine {
     var st = window.getComputedStyle(el);
     if(st.display==='none' || st.visibility==='hidden' || parseFloat(st.opacity||'1')===0) return false;
     return true;
+  }
+
+  function cssPath(el){
+    if(!el || el.nodeType!==1) return '';
+    if(el.id) return '#'+el.id;
+    var dt = el.getAttribute('data-testid');
+    if(dt) return '[data-testid="'+dt+'"]';
+    var al = el.getAttribute('aria-label');
+    if(al) return el.tagName.toLowerCase()+'[aria-label="'+al.replace(/"/g,'\\"')+'"]';
+    var parts=[];
+    var cur=el;
+    for(var depth=0; cur && cur.nodeType===1 && depth<5; depth++){
+      var name=cur.tagName.toLowerCase();
+      var parent=cur.parentElement;
+      if(parent){
+        var sibs=[].filter.call(parent.children,function(c){return c.tagName===cur.tagName;});
+        if(sibs.length>1){
+          var idx=[].indexOf.call(sibs,cur)+1;
+          name+=':nth-of-type('+idx+')';
+        }
+      }
+      parts.unshift(name);
+      cur=parent;
+    }
+    return parts.join(' > ');
   }
 
   function scoreInput(el){
@@ -200,7 +226,7 @@ object WebViewChatEngine {
     if(el.getAttribute('role')==='textbox') s += 30;
     if(/prompt-textarea|composer|chat-input/.test(ph)) s += 40;
     if(r.width > 160) s += 15;
-    if(r.top > (window.innerHeight||800)*0.4) s += 20;
+    if(r.top > (window.innerHeight||800)*0.35) s += 20;
     if(/message|ask|prompt|chat|send a|type|write/.test(ph)) s += 20;
     if(/search|email|password/.test(ph)) s -= 50;
     if(!visible(el)) s -= 100;
@@ -209,8 +235,14 @@ object WebViewChatEngine {
   }
 
   function findInput(){
+    if(LEARNED_IN){
+      try{
+        var le=document.querySelector(LEARNED_IN);
+        if(le && visible(le) && scoreInput(le)>=10) return le;
+      }catch(e){}
+    }
     var nodes = Array.prototype.slice.call(document.querySelectorAll(
-      'textarea, [contenteditable="true"], div[role="textbox"], p[data-placeholder], input[type="text"], input:not([type])'
+      'textarea, [contenteditable="true"], div[role="textbox"], #prompt-textarea, p[data-placeholder], input[type="text"], input:not([type])'
     ));
     var best=null, bestScore=-999;
     nodes.forEach(function(el){
@@ -220,53 +252,46 @@ object WebViewChatEngine {
     return (best && bestScore>=15) ? best : null;
   }
 
-  /** Spatial: nearest clickable to the RIGHT / same row as input */
   function findSendSpatial(input){
     var ir = input.getBoundingClientRect();
     var cx = ir.right, cy = (ir.top+ir.bottom)/2;
     var candidates = Array.prototype.slice.call(document.querySelectorAll(
-      'button, [role="button"], input[type="submit"], a, div[tabindex], span[tabindex], [data-testid*="send"], [aria-label*="Send" i], [aria-label*="submit" i]'
+      'button, [role="button"], input[type="submit"], [data-testid*="send"], [aria-label*="Send" i]'
     ));
     var best=null, bestScore=-1e9;
     candidates.forEach(function(el){
       if(!visible(el)) return;
       var r = el.getBoundingClientRect();
-      if(r.width<8 || r.height<8 || r.width>200 || r.height>80) return;
+      if(r.width<8 || r.height<8 || r.width>220 || r.height>90) return;
       var ex = (r.left+r.right)/2, ey = (r.top+r.bottom)/2;
       var dx = ex - cx, dy = Math.abs(ey - cy);
-      var label = ((el.getAttribute('aria-label')||'')+' '+(el.getAttribute('data-testid')||'')+' '+(el.getAttribute('title')||'')+' '+(el.className||'')+' '+(el.innerText||'')).toLowerCase();
+      var label = ((el.getAttribute('aria-label')||'')+' '+(el.getAttribute('data-testid')||'')+' '+(el.className||'')+' '+(el.innerText||'')).toLowerCase();
       var score = 0;
-      // prefer to the right of input, same vertical band
-      if(dx >= -20 && dx < 280) score += 80 - dx*0.15;
+      if(dx >= -30 && dx < 300) score += 80 - dx*0.12;
       else score -= Math.abs(dx)*0.2;
       score -= dy * 0.8;
       if(/send|submit|arrow|paper|airplane|reply/.test(label)) score += 60;
       if(/stop|cancel|attach|upload|mic|voice|image|file|plus|menu/.test(label)) score -= 80;
-      if(el.disabled || el.getAttribute('aria-disabled')==='true') score -= 15;
-      if(el.closest && el.closest('form')) score += 10;
-      // SVG path buttons (icon-only send)
+      if(el.disabled || el.getAttribute('aria-disabled')==='true') score -= 10;
       if(el.querySelector && el.querySelector('svg')) score += 8;
       if(score > bestScore){ bestScore = score; best = el; }
     });
-    return bestScore > 20 ? best : null;
+    return bestScore > 15 ? best : null;
   }
 
   function findSendByAttr(){
-    var sels = [
-      '[data-testid="send-button"]',
-      '[data-testid*="send"]',
-      'button[aria-label*="Send" i]',
-      'button[aria-label*="提交"]',
-      'button[type="submit"]',
-      'button.send-button',
-      '[class*="send"] button',
-      'form button[type="submit"]'
-    ];
+    if(LEARNED_SEND){
+      try{
+        var le=document.querySelector(LEARNED_SEND);
+        if(le && visible(le)) return le;
+      }catch(e){}
+    }
+    var sels = ['[data-testid="send-button"]','[data-testid*="send"]','button[aria-label*="Send" i]','button[type="submit"]','form button[type="submit"]'];
     for(var i=0;i<sels.length;i++){
-      try {
-        var el = document.querySelector(sels[i]);
+      try{
+        var el=document.querySelector(sels[i]);
         if(el && visible(el)) return el;
-      } catch(e){}
+      }catch(e){}
     }
     return null;
   }
@@ -281,7 +306,7 @@ object WebViewChatEngine {
       .filter(function(l){return l && !isChromeLine(l);}).join('\n').trim();
   }
   function lastAssistantText(){
-    var sels = ['[data-message-author-role="assistant"]','[data-role="assistant"]','[data-testid*="assistant"]','.markdown.prose','.prose','article','.message-content','.chat-message'];
+    var sels=['[data-message-author-role="assistant"]','[data-role="assistant"]','[data-testid*="assistant"]','.markdown.prose','.prose','article'];
     for(var s=0;s<sels.length;s++){
       var nodes=document.querySelectorAll(sels[s]);
       if(!nodes||!nodes.length) continue;
@@ -294,127 +319,99 @@ object WebViewChatEngine {
   }
 
   function fireKey(el,type,key,code,keyCode){
-    try{
-      el.dispatchEvent(new KeyboardEvent(type,{key:key,code:code,keyCode:keyCode,which:keyCode,bubbles:true,cancelable:true,composed:true}));
-    }catch(e){}
+    try{ el.dispatchEvent(new KeyboardEvent(type,{key:key,code:code,keyCode:keyCode,which:keyCode,bubbles:true,cancelable:true,composed:true})); }catch(e){}
   }
   function firePointer(el){
-    var types=['pointerdown','mousedown','pointerup','mouseup','click'];
-    types.forEach(function(t){
+    ['pointerdown','mousedown','pointerup','mouseup','click'].forEach(function(t){
       try{
         var C = t.indexOf('pointer')===0 ? PointerEvent : MouseEvent;
-        el.dispatchEvent(new C(t,{bubbles:true,cancelable:true,view:window,buttons:1,clientX:0,clientY:0}));
+        el.dispatchEvent(new C(t,{bubbles:true,cancelable:true,view:window,buttons:1}));
       }catch(e){
         try{ el.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,view:window})); }catch(e2){}
       }
     });
   }
-
   function readInputValue(el){
     if(!el) return '';
-    if(el.isContentEditable || el.getAttribute('contenteditable')==='true')
-      return (el.innerText||el.textContent||'').trim();
+    if(el.isContentEditable || el.getAttribute('contenteditable')==='true') return (el.innerText||el.textContent||'').trim();
     return (el.value||'').trim();
   }
-
   function fillAll(el, text){
     el.focus();
     try{ el.click(); }catch(e){}
     var isEd = el.isContentEditable || el.getAttribute('contenteditable')==='true' || el.getAttribute('role')==='textbox';
     try{
       if(isEd){
-        // ProseMirror / contenteditable path
         document.execCommand('selectAll', false, null);
         document.execCommand('delete', false, null);
-        // beforeinput + insertText is what many editors listen for
-        try{
-          el.dispatchEvent(new InputEvent('beforeinput',{bubbles:true,cancelable:true,inputType:'insertText',data:text}));
-        }catch(e){}
-        var okIns = false;
-        try{ okIns = document.execCommand('insertText', false, text); }catch(e){}
+        try{ el.dispatchEvent(new InputEvent('beforeinput',{bubbles:true,cancelable:true,inputType:'insertText',data:text})); }catch(e){}
+        var okIns=false;
+        try{ okIns=document.execCommand('insertText', false, text); }catch(e){}
         if(!okIns){
-          el.textContent = text;
-          try{
-            el.dispatchEvent(new InputEvent('input',{bubbles:true,data:text,inputType:'insertText'}));
-          }catch(e){ el.dispatchEvent(new Event('input',{bubbles:true})); }
+          el.textContent=text;
+          try{ el.dispatchEvent(new InputEvent('input',{bubbles:true,data:text,inputType:'insertText'})); }
+          catch(e){ el.dispatchEvent(new Event('input',{bubbles:true})); }
         }
       } else {
         var proto = el.tagName==='TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
         var desc = Object.getOwnPropertyDescriptor(proto,'value');
         if(desc && desc.set) desc.set.call(el, text); else el.value = text;
-        try{
-          el.dispatchEvent(new InputEvent('input',{bubbles:true,data:text,inputType:'insertText'}));
-        }catch(e){ el.dispatchEvent(new Event('input',{bubbles:true})); }
+        try{ el.dispatchEvent(new InputEvent('input',{bubbles:true,data:text,inputType:'insertText'})); }
+        catch(e){ el.dispatchEvent(new Event('input',{bubbles:true})); }
         el.dispatchEvent(new Event('change',{bubbles:true}));
       }
     }catch(e){}
   }
 
+  var lastSendEl = null;
   function trySubmit(input){
-    var attempts = [];
-    // 1) attribute selectors
-    var byAttr = findSendByAttr();
-    if(byAttr){ attempts.push(byAttr); }
-    // 2) spatial nearest
-    var bySpace = findSendSpatial(input);
+    var attempts=[];
+    var byAttr=findSendByAttr();
+    if(byAttr) attempts.push(byAttr);
+    var bySpace=findSendSpatial(input);
     if(bySpace && attempts.indexOf(bySpace)<0) attempts.push(bySpace);
-    // 3) form submit
-    var form = input.closest && input.closest('form');
+    var form=input.closest && input.closest('form');
     if(form){
-      try{
-        if(typeof form.requestSubmit==='function'){ form.requestSubmit(); return true; }
-      }catch(e){}
-      try{ form.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})); return true; }catch(e){}
+      try{ if(typeof form.requestSubmit==='function'){ form.requestSubmit(); lastSendEl=form; return true; } }catch(e){}
     }
-    // 4) click each candidate with full pointer sequence
     for(var i=0;i<attempts.length;i++){
-      var btn = attempts[i];
-      try{
-        btn.removeAttribute('disabled');
-        btn.setAttribute('aria-disabled','false');
-        btn.disabled = false;
-      }catch(e){}
+      var btn=attempts[i];
+      lastSendEl=btn;
+      try{ btn.removeAttribute('disabled'); btn.disabled=false; }catch(e){}
       try{ firePointer(btn); }catch(e){}
       try{ btn.click(); }catch(e){}
     }
-    // 5) Enter key (with and without shift)
     fireKey(input,'keydown','Enter','Enter',13);
     fireKey(input,'keypress','Enter','Enter',13);
     fireKey(input,'keyup','Enter','Enter',13);
-    // Ctrl/Cmd+Enter used by some UIs
-    try{
-      input.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true,ctrlKey:true}));
-    }catch(e){}
-    return attempts.length > 0;
+    try{ input.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true,ctrlKey:true})); }catch(e){}
+    return attempts.length>0;
   }
 
   var input = findInput();
   if(!input){
-    fail('No chat input found. Sign in and open an active chat thread first.');
+    fail('No chat input found. Open Providers → Sign in → wait until the chat box is visible → Back.');
     return;
   }
 
   var beforeAssist = lastAssistantText();
   fillAll(input, MSG);
 
-  // Wait for React to enable Send, then submit hard
   setTimeout(function(){
     trySubmit(input);
     setTimeout(function(){
-      // If text still sitting in the box, force another round
       var still = readInputValue(input);
       if(still && still.indexOf(MSG.slice(0, Math.min(12, MSG.length))) >= 0){
         trySubmit(input);
-        // last resort: parent walk for any clickable near input
         var p = input.parentElement;
         for(var d=0; d<5 && p; d++){
           var btns = p.querySelectorAll('button, [role="button"]');
           for(var b=0;b<btns.length;b++){
-            var lab = ((btns[b].getAttribute('aria-label')||'')+(btns[b].innerText||'')).toLowerCase();
+            var lab=((btns[b].getAttribute('aria-label')||'')+(btns[b].innerText||'')).toLowerCase();
             if(/stop|attach|upload|mic/.test(lab)) continue;
-            try{ firePointer(btns[b]); btns[b].click(); }catch(e){}
+            try{ firePointer(btns[b]); btns[b].click(); lastSendEl=btns[b]; }catch(e){}
           }
-          p = p.parentElement;
+          p=p.parentElement;
         }
       }
 
@@ -425,24 +422,27 @@ object WebViewChatEngine {
         if(cur && cur!==beforeAssist && cur.length>2){
           if(cur===last){
             stable++;
-            if(stable>=3){ clearInterval(timer); ok(cur); }
+            if(stable>=3){
+              clearInterval(timer);
+              learn(cssPath(input), cssPath(lastSendEl));
+              ok(cur);
+            }
           } else { stable=0; last=cur; }
         }
-        // also: if input cleared, message likely sent — keep waiting for reply
-        if(tries>120){
+        if(tries>130){
           clearInterval(timer);
-          if(last&&last.length>2) ok(last);
+          if(last&&last.length>2){ learn(cssPath(input), cssPath(lastSendEl)); ok(last); }
           else {
-            var left = readInputValue(input);
+            var left=readInputValue(input);
             if(left && left.length>0)
-              fail('Message still in the input — Send was not accepted by the page. Re-sign in on the chat screen and retry.');
+              fail('Message still in the input — page did not accept Send. Re-sign in on the chat UI and retry.');
             else
-              fail('Message may have sent but no assistant reply was detected.');
+              fail('No assistant reply detected after send.');
           }
         }
       }, 700);
-    }, 400);
-  }, 300);
+    }, 500);
+  }, 400);
 })();
         """.trimIndent()
     }
