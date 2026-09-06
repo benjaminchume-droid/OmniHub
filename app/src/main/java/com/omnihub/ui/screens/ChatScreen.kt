@@ -22,12 +22,15 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import com.omnihub.OmniHubApp
 import com.omnihub.data.UserPrefs
 import com.omnihub.history.ConversationEntity
@@ -128,15 +131,35 @@ fun ChatScreen(
         return sources.find { it.info.id == preferred }?.info?.name ?: preferred
     }
 
+    // Reload installed sources when returning to chat
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val obs = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                app.sourceManager.reload()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(obs)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(obs) }
+    }
+
     LaunchedEffect(Unit) {
         refreshGreeting()
+        app.sourceManager.reload()
         app.chatRepo.observeConversations().collect { conversations = it }
     }
 
-    LaunchedEffect(currentConvId) {
+    // Keep messages bound to Room so they survive navigation
+    LaunchedEffect(currentConvId, incognito) {
         val id = currentConvId
         if (id != null && !incognito) {
-            messages = app.chatRepo.getMessages(id).map { ChatBubble(it.role, it.content) }
+            app.chatRepo.observeMessages(id).collect { list ->
+                if (!sending) {
+                    messages = list.map { ChatBubble(it.role, it.content) }
+                }
+            }
+        } else if (id == null && !sending) {
+            messages = emptyList()
         }
     }
 
@@ -167,7 +190,9 @@ fun ChatScreen(
                 val target = preferredId?.let { app.sourceManager.get(it) }
                     ?: app.sourceManager.all().firstOrNull()
                 if (target == null) {
-                    messages = messages.dropLast(1) + ChatBubble("assistant", "No providers. Open Providers.")
+                    val err = "No source installed. Open Store, install a provider, then Providers → Sign in."
+                    messages = messages.dropLast(1) + ChatBubble("assistant", err)
+                    if (!incognito && convId != null) app.chatRepo.addMessage(convId, "assistant", err)
                 } else {
                     val buf = StringBuilder()
                     ProviderBridge.streamChat(
@@ -188,7 +213,12 @@ fun ChatScreen(
                     runCatching { app.soul.learnFromExchange(target.info.id, hist, final, convId) }
                 }
             } catch (e: Exception) {
-                messages = messages.dropLast(1) + ChatBubble("assistant", e.message ?: "Something went wrong.")
+                val err = e.message?.takeIf { it.isNotBlank() } ?: "Something went wrong."
+                messages = messages.dropLast(1) + ChatBubble("assistant", err)
+                val cid = currentConvId
+                if (!incognito && cid != null) {
+                    runCatching { app.chatRepo.addMessage(cid, "assistant", err) }
+                }
             } finally {
                 sending = false
             }
@@ -299,6 +329,9 @@ fun ChatScreen(
         ModalBottomSheet(onDismissRequest = { showProviderSheet = false }) {
             Column(Modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text("Provider", fontWeight = FontWeight.Bold)
+                if (sources.isEmpty()) {
+                    Text("Install a source from Store first.", style = MaterialTheme.typography.bodySmall)
+                }
                 Spacer(Modifier.height(8.dp))
                 (listOf("auto" to "Auto") + sources.map { it.info.id to it.info.name }).forEach { (id, label) ->
                     NavigationDrawerItem(
