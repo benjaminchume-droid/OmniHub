@@ -27,6 +27,18 @@ object ApkInstaller {
         val publishedAt: String
     )
 
+    /** chatgpt-1.0.0.apk → chatgpt ; mcp_github-1.0.0.apk → mcp_github */
+    private fun idFromApkName(name: String): String {
+        val base = name.removeSuffix(".apk").removeSuffix(".APK")
+        val m = Regex("^(.+)-\\d+\\.\\d+\\.\\d+$").find(base)
+        return m?.groupValues?.get(1) ?: base.substringBefore("-v").substringBefore("_").ifBlank { base }
+    }
+
+    private fun displayName(id: String): String =
+        id.replace('_', ' ').split(' ').joinToString(" ") { part ->
+            part.replaceFirstChar { c -> c.titlecase() }
+        }
+
     suspend fun fetchReleases(
         owner: String = "benjaminchume-droid",
         repo: String = "OmniHub-Sources"
@@ -38,6 +50,7 @@ object ApkInstaller {
         val body = http.newCall(req).execute().use { it.body?.string().orEmpty() }
         val arr = JSONArray(if (body.startsWith("[")) body else "[]")
         val out = mutableListOf<ReleaseItem>()
+        val seen = mutableSetOf<String>()
         for (i in 0 until arr.length()) {
             val rel = arr.getJSONObject(i)
             val tag = rel.optString("tag_name")
@@ -46,12 +59,14 @@ object ApkInstaller {
                 val a = assets.getJSONObject(j)
                 val name = a.optString("name")
                 if (!name.endsWith(".apk", true)) continue
-                val id = name.removeSuffix(".apk").substringBefore("-v").substringBefore("_")
-                val kind = if (name.contains("mcp", true)) "MCP" else "WEB"
+                val id = idFromApkName(name)
+                if (id in seen) continue
+                seen.add(id)
+                val kind = if (id.startsWith("mcp") || name.contains("mcp", true)) "MCP" else "WEB"
                 out.add(
                     ReleaseItem(
                         id = id,
-                        name = name.removeSuffix(".apk"),
+                        name = displayName(id),
                         tag = tag,
                         kind = kind,
                         apkUrl = a.optString("browser_download_url"),
