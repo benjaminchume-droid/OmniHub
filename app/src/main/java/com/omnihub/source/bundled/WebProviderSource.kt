@@ -27,10 +27,12 @@ class WebProviderSource(
         capabilities = SourceCapabilities(chat = true, coding = true, research = true)
     )
 
-    override fun isConfigured(): Boolean = ProviderAuthStore.isSignedIn(context, sourceId)
+    // Always attempt; bridge decides guest vs session
+    override fun isConfigured(): Boolean = true
 
     override fun health(): SourceHealth =
-        if (isConfigured()) SourceHealth.HEALTHY else SourceHealth.AUTH_REQUIRED
+        if (ProviderAuthStore.isSignedIn(context, sourceId)) SourceHealth.HEALTHY
+        else SourceHealth.UNKNOWN
 
     override suspend fun chat(request: SourceChatRequest): ChatResponse = withContext(Dispatchers.IO) {
         ProviderBridge.chatOnce(

@@ -1,7 +1,6 @@
 package com.omnihub.ui.screens
 
 import android.content.Intent
-import android.widget.Toast
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -49,7 +48,7 @@ fun SourcesScreen(onBack: () -> Unit) {
         ) {
             item {
                 Text(
-                    "Built-in Web Cores. Sign in once, then messages relay and stream back.",
+                    "Sign in once. Messages go to the provider and the reply shows here.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -61,7 +60,7 @@ fun SourcesScreen(onBack: () -> Unit) {
                         Column(Modifier.weight(1f)) {
                             Text(src.info.name, fontWeight = FontWeight.SemiBold)
                             Text(
-                                if (signed) "Ready" else "Sign in required",
+                                if (signed) "Ready" else "Sign in",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = if (signed) OmniAmber else MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -76,14 +75,13 @@ fun SourcesScreen(onBack: () -> Unit) {
                             Button(
                                 onClick = {
                                     val i = Intent(context, WebLoginActivity::class.java).apply {
-                                        putExtra("url", src.info.websiteUrl)
+                                        putExtra(WebLoginActivity.EXTRA_URL, src.info.websiteUrl)
+                                        putExtra(WebLoginActivity.EXTRA_TITLE, src.info.name)
                                         putExtra("provider_id", src.info.id)
                                         putExtra("provider_name", src.info.name)
                                     }
                                     context.startActivity(i)
-                                    ProviderAuthStore.setSignedIn(context, src.info.id, true)
-                                    tick++
-                                    Toast.makeText(context, "Complete sign-in, then chat", Toast.LENGTH_LONG).show()
+                                    // Do NOT mark signed-in until WebLoginActivity saves a real session
                                 },
                                 colors = ButtonDefaults.buttonColors(containerColor = OmniAmber, contentColor = Color.Black)
                             ) {
@@ -94,13 +92,6 @@ fun SourcesScreen(onBack: () -> Unit) {
                         }
                     }
                 }
-            }
-            item {
-                Text(
-                    "More providers: Store → install APK from Releases.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
             }
         }
     }
