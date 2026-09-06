@@ -6,7 +6,6 @@ import android.widget.Toast
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -16,8 +15,6 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import com.omnihub.OmniHubApp
 import com.omnihub.data.SecureStore
@@ -43,6 +40,7 @@ fun SettingsScreen(
     var language by remember { mutableStateOf(UserPrefs.isLanguageAnalysisEnabled(context)) }
     var personality by remember { mutableStateOf(UserPrefs.isPersonalityInsightsEnabled(context)) }
     var analyticsSummary by remember { mutableStateOf("Your Omni activity") }
+    val omniFolder = remember { UserPrefs.getOmniFolder(context) ?: "Not set" }
 
     LaunchedEffect(Unit) {
         try {
@@ -69,6 +67,13 @@ fun SettingsScreen(
         ) {
             Text("Omni", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
             ListItem(
+                headlineContent = { Text("Store") },
+                supportingContent = { Text("Install providers from OmniSource") },
+                leadingContent = { Icon(Icons.Default.Store, null) },
+                trailingContent = { Icon(Icons.Default.ChevronRight, null) },
+                modifier = Modifier.clickable { onOpenStore() }
+            )
+            ListItem(
                 headlineContent = { Text("Analytics") },
                 supportingContent = { Text(analyticsSummary) },
                 leadingContent = { Icon(Icons.Default.Analytics, null) },
@@ -76,14 +81,12 @@ fun SettingsScreen(
                 modifier = Modifier.clickable { onOpenAnalytics() }
             )
             ListItem(
-                headlineContent = { Text("Omni Store") },
-                supportingContent = { Text("Install API, Web, and MCP sources from OmniHub-Sources") },
-                leadingContent = { Icon(Icons.Default.Store, null) },
-                trailingContent = { Icon(Icons.Default.ChevronRight, null) },
-                modifier = Modifier.clickable { onOpenStore() }
+                headlineContent = { Text("Omni folder") },
+                supportingContent = { Text(omniFolder) },
+                leadingContent = { Icon(Icons.Default.Folder, null) }
             )
 
-            Divider(Modifier.padding(vertical = 8.dp))
+            HorizontalDivider(Modifier.padding(vertical = 8.dp))
             Text("Privacy", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
             ListItem(
                 headlineContent = { Text("Analytics collection") },
@@ -113,40 +116,20 @@ fun SettingsScreen(
                 }
             )
 
-            Divider(Modifier.padding(vertical = 8.dp))
-            Text("API Keys", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-            Text(
-                "Keys use Android Keystore. Paste a key and send a message — that is the path that replies.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            ProviderKeyField("OpenAI", "openai")
-            ProviderKeyField("Anthropic", "anthropic")
-            ProviderKeyField("Gemini", "gemini")
-            ProviderKeyField("Groq", "groq")
-            ProviderKeyField("DeepSeek", "deepseek")
-            ProviderKeyField("OpenRouter", "openrouter")
-            ProviderKeyField("Kimi", "kimi")
-            ProviderKeyField("Mistral", "mistral")
-            ProviderKeyField("Perplexity", "perplexity")
-            ProviderKeyField("NVIDIA", "nvidia")
-            ProviderKeyField("Z.AI", "zai")
-
-            Divider(Modifier.padding(vertical = 8.dp))
+            HorizontalDivider(Modifier.padding(vertical = 8.dp))
             Text("Connectors", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
             ListItem(
-                headlineContent = { Text("MCP / Connectors") },
-                supportingContent = { Text("GitHub, Supabase, Vercel, Gmail, Maps, custom URLs") },
+                headlineContent = { Text("MCP connectors") },
+                supportingContent = { Text("Installed tool providers") },
                 leadingContent = { Icon(Icons.Default.Extension, null) },
                 trailingContent = { Icon(Icons.Default.ChevronRight, null) },
                 modifier = Modifier.clickable { onOpenConnectors() }
             )
 
-            Divider(Modifier.padding(vertical = 8.dp))
-            Text("Data & Privacy", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            HorizontalDivider(Modifier.padding(vertical = 8.dp))
+            Text("Data", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
             ListItem(
                 headlineContent = { Text("Export my data") },
-                supportingContent = { Text("Save conversations as JSON on device") },
                 leadingContent = { Icon(Icons.Default.Download, null) },
                 modifier = Modifier.clickable {
                     scope.launch {
@@ -155,7 +138,7 @@ fun SettingsScreen(
                             val dir = context.getExternalFilesDir(null) ?: context.filesDir
                             val file = File(dir, "omnihub_export_${System.currentTimeMillis()}.json")
                             file.writeText(json)
-                            status = "Exported to ${file.absolutePath}"
+                            status = "Exported"
                             Toast.makeText(context, "Exported", Toast.LENGTH_SHORT).show()
                         } catch (e: Exception) {
                             status = e.message
@@ -165,68 +148,46 @@ fun SettingsScreen(
             )
             ListItem(
                 headlineContent = { Text("Delete all data") },
-                supportingContent = { Text("Wipe chats, keys, and sessions from this device") },
                 leadingContent = { Icon(Icons.Default.DeleteForever, null, tint = MaterialTheme.colorScheme.error) },
                 modifier = Modifier.clickable { confirmDelete = true }
             )
 
-            Divider(Modifier.padding(vertical = 8.dp))
+            HorizontalDivider(Modifier.padding(vertical = 8.dp))
             Text("Legal", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
             ListItem(
                 headlineContent = { Text("Privacy Policy") },
                 leadingContent = { Icon(Icons.Default.PrivacyTip, null) },
-                trailingContent = { Icon(Icons.Default.ChevronRight, null) },
                 modifier = Modifier.clickable { onOpenLegal(LegalDoc.PRIVACY) }
             )
             ListItem(
                 headlineContent = { Text("Terms of Service") },
                 leadingContent = { Icon(Icons.Default.Description, null) },
-                trailingContent = { Icon(Icons.Default.ChevronRight, null) },
                 modifier = Modifier.clickable { onOpenLegal(LegalDoc.TERMS) }
             )
             ListItem(
                 headlineContent = { Text("Community Guidelines") },
                 leadingContent = { Icon(Icons.Default.Groups, null) },
-                trailingContent = { Icon(Icons.Default.ChevronRight, null) },
                 modifier = Modifier.clickable { onOpenLegal(LegalDoc.COMMUNITY) }
             )
 
-            Divider(Modifier.padding(vertical = 8.dp))
-            Text("App", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            HorizontalDivider(Modifier.padding(vertical = 8.dp))
             ListItem(
                 headlineContent = { Text("Version") },
-                supportingContent = { Text("1.0.2") },
+                supportingContent = { Text("1.0.3") },
                 leadingContent = { Icon(Icons.Default.Info, null) }
             )
             ListItem(
-                headlineContent = { Text("Set as Digital Assistant") },
-                supportingContent = { Text("Opens system settings so you can set OmniHub as default") },
+                headlineContent = { Text("Digital assistant") },
+                supportingContent = { Text("Set as default") },
                 leadingContent = { Icon(Icons.Default.RecordVoiceOver, null) },
                 modifier = Modifier.clickable {
                     try {
-                        val intents = listOf(
-                            Intent(Settings.ACTION_VOICE_INPUT_SETTINGS),
-                            Intent(Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS),
-                            Intent(Settings.ACTION_SETTINGS)
-                        )
-                        var launched = false
-                        for (intent in intents) {
-                            try {
-                                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                context.startActivity(intent)
-                                launched = true
-                                break
-                            } catch (_: Exception) {}
-                        }
-                        if (!launched) {
-                            Toast.makeText(context, "Open Settings → Default apps → Digital assistant", Toast.LENGTH_LONG).show()
-                        }
-                    } catch (e: Exception) {
-                        Toast.makeText(context, e.message ?: "Could not open settings", Toast.LENGTH_SHORT).show()
+                        context.startActivity(Intent(Settings.ACTION_VOICE_INPUT_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                    } catch (_: Exception) {
+                        Toast.makeText(context, "Open system settings", Toast.LENGTH_SHORT).show()
                     }
                 }
             )
-
             status?.let {
                 Text(it, color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodySmall)
             }
@@ -238,7 +199,7 @@ fun SettingsScreen(
         AlertDialog(
             onDismissRequest = { confirmDelete = false },
             title = { Text("Delete all data?") },
-            text = { Text("This permanently removes all conversations, API keys, and web sessions from this device.") },
+            text = { Text("Removes chats and local secrets from this device.") },
             confirmButton = {
                 TextButton(onClick = {
                     confirmDelete = false
@@ -247,47 +208,16 @@ fun SettingsScreen(
                             app.chatRepo.deleteAll()
                             SecureStore.clearAllSecrets(context)
                             app.reloadProviders()
-                            status = "All local data deleted"
-                            Toast.makeText(context, "Deleted", Toast.LENGTH_SHORT).show()
+                            status = "Deleted"
                         } catch (e: Exception) {
                             status = e.message
                         }
                     }
-                }) { Text("Delete everything") }
+                }) { Text("Delete") }
             },
             dismissButton = {
                 TextButton(onClick = { confirmDelete = false }) { Text("Cancel") }
             }
         )
     }
-}
-
-@Composable
-private fun ProviderKeyField(label: String, providerId: String) {
-    val context = LocalContext.current
-    val app = context.applicationContext as OmniHubApp
-    var value by remember { mutableStateOf(SecureStore.getApiKey(context, providerId).orEmpty()) }
-    var visible by remember { mutableStateOf(false) }
-    OutlinedTextField(
-        value = value,
-        onValueChange = {
-            value = it
-            if (it.isBlank()) {
-                SecureStore.removeSecret(context, "api_key_$providerId")
-            } else {
-                SecureStore.setApiKey(context, providerId, it.trim())
-            }
-            app.reloadProviders()
-        },
-        modifier = Modifier.fillMaxWidth(),
-        label = { Text(label) },
-        singleLine = true,
-        shape = RoundedCornerShape(12.dp),
-        visualTransformation = if (visible) VisualTransformation.None else PasswordVisualTransformation(),
-        trailingIcon = {
-            IconButton(onClick = { visible = !visible }) {
-                Icon(if (visible) Icons.Default.VisibilityOff else Icons.Default.Visibility, null)
-            }
-        }
-    )
 }
