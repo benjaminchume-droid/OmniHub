@@ -20,8 +20,11 @@ import com.omnihub.BuildConfig
 import com.omnihub.OmniHubApp
 import com.omnihub.data.SecureStore
 import com.omnihub.data.UserPrefs
+import com.omnihub.source.extension.ApkInstaller
 import com.omnihub.update.AppUpdateChecker
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -45,12 +48,30 @@ fun SettingsScreen(
     val omniFolder = remember { UserPrefs.getOmniFolder(context) ?: "Not set" }
     var updateStatus by remember { mutableStateOf<String?>(null) }
     var checkingUpdate by remember { mutableStateOf(false) }
+    var downloadPct by remember { mutableStateOf(-1) }
+    var downloadEta by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(Unit) {
         try {
             val snap = app.analyticsRepo.snapshot(30)
             analyticsSummary = com.omnihub.analytics.AnalyticsEntitlement.compactSummaryLabel(snap)
         } catch (_: Exception) {}
+    }
+
+    fun formatEta(sec: Long?): String? {
+        if (sec == null || sec < 0) return null
+        if (sec < 60) return "${sec}s left"
+        val m = sec / 60
+        val s = sec % 60
+        return if (m < 60) "${m}m ${s}s left" else "${m / 60}h ${m % 60}m left"
+    }
+
+    fun formatSpeed(bps: Long): String {
+        return when {
+            bps >= 1_000_000 -> "${bps / 1_000_000} MB/s"
+            bps >= 1_000 -> "${bps / 1_000} KB/s"
+            else -> "$bps B/s"
+        }
     }
 
     Scaffold(
@@ -179,11 +200,28 @@ fun SettingsScreen(
             ListItem(
                 headlineContent = { Text("Check for updates") },
                 supportingContent = {
-                    Text(updateStatus ?: "Looks for Nightly builds on GitHub")
+                    Column {
+                        Text(updateStatus ?: "Looks for builds on GitHub Releases")
+                        if (downloadPct in 0..100 && checkingUpdate) {
+                            Spacer(Modifier.height(6.dp))
+                            LinearProgressIndicator(
+                                progress = { downloadPct / 100f },
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                buildString {
+                                    append("$downloadPct%")
+                                    downloadEta?.let { append(" · $it") }
+                                },
+                                style = MaterialTheme.typography.labelSmall
+                            )
+                        }
+                    }
                 },
                 leadingContent = { Icon(Icons.Default.SystemUpdate, null) },
                 trailingContent = {
-                    if (checkingUpdate) {
+                    if (checkingUpdate && downloadPct < 0) {
                         CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
                     } else {
                         Icon(Icons.Default.ChevronRight, null)
@@ -191,23 +229,36 @@ fun SettingsScreen(
                 },
                 modifier = Modifier.clickable(enabled = !checkingUpdate) {
                     checkingUpdate = true
+                    downloadPct = -1
+                    downloadEta = null
                     updateStatus = "Checking…"
                     scope.launch {
                         try {
                             val info = AppUpdateChecker.checkOmniHub(context)
                             if (info == null) {
-                                updateStatus = "You're on the latest build"
+                                updateStatus = "You're on the latest build (${BuildConfig.VERSION_NAME})"
                             } else {
                                 updateStatus = "Downloading ${info.tag}…"
-                                val result = AppUpdateChecker.downloadAndInstall(context, info)
+                                val result = AppUpdateChecker.downloadAndInstall(context, info) { p ->
+                                    scope.launch(Dispatchers.Main.immediate) {
+                                        downloadPct = if (p.percent >= 0) p.percent else downloadPct
+                                        val eta = formatEta(p.etaSeconds)
+                                        val speed = formatSpeed(p.bytesPerSec)
+                                        downloadEta = listOfNotNull(eta, speed.takeIf { p.bytesPerSec > 0 }).joinToString(" · ")
+                                        updateStatus = "Downloading ${info.tag}… ${p.percent}%"
+                                    }
+                                }
                                 updateStatus = if (result.isSuccess) {
+                                    downloadPct = 100
                                     "Install when prompted (${info.tag})"
                                 } else {
-                                    result.exceptionOrNull()?.message ?: "Download failed"
+                                    result.exceptionOrNull()?.message
+                                        ?: "Download failed — reconnect and tap again to resume"
                                 }
                             }
                         } catch (e: Exception) {
-                            updateStatus = e.message ?: "Check failed"
+                            updateStatus = (e.message ?: "Check failed") +
+                                " — tap again to resume if a partial download exists"
                         } finally {
                             checkingUpdate = false
                         }
