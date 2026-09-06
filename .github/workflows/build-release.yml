@@ -63,25 +63,35 @@ jobs:
             echo "keyPassword=${{ secrets.KEY_PASSWORD }}"
           } > keystore.properties
 
+      - name: Read versionName
+        id: ver
+        run: |
+          VN=$(grep -E 'versionName\s*=' app/build.gradle.kts | head -1 | sed -E 's/.*versionName\s*=\s*"([^"]+)".*/\1/')
+          if [ -z "$VN" ]; then VN="1.0.8.2"; fi
+          echo "version=$VN" >> $GITHUB_OUTPUT
+          echo "Resolved versionName=$VN"
+
       - name: Decide channel
         id: meta
         run: |
           CHANNEL="${{ github.event.inputs.channel }}"
           if [ -z "$CHANNEL" ]; then CHANNEL=nightly; fi
-          # pushes to main are always nightly fix builds
           if [ "${{ github.event_name }}" = "push" ]; then CHANNEL=nightly; fi
-          echo "channel=$CHANNEL" >> $GITHUB_OUTPUT
+          VN="${{ steps.ver.outputs.version }}"
           DAY=$(date -u +%Y%m%d)
+          echo "channel=$CHANNEL" >> $GITHUB_OUTPUT
           if [ "$CHANNEL" = "stable" ]; then
-            echo "tag=v1.0.7-${{ github.run_number }}" >> $GITHUB_OUTPUT
-            echo "name=OmniHub v1.0.7 (build ${{ github.run_number }})" >> $GITHUB_OUTPUT
-            echo "apk=OmniHub-v1.0.7.apk" >> $GITHUB_OUTPUT
+            echo "tag=v${VN}" >> $GITHUB_OUTPUT
+            echo "name=OmniHub v${VN}" >> $GITHUB_OUTPUT
+            echo "apk=OmniHub-v${VN}.apk" >> $GITHUB_OUTPUT
             echo "prerelease=false" >> $GITHUB_OUTPUT
+            echo "make_latest=true" >> $GITHUB_OUTPUT
           else
-            echo "tag=nightly-$DAY-${{ github.run_number }}" >> $GITHUB_OUTPUT
-            echo "name=OmniHub Nightly $DAY #${{ github.run_number }}" >> $GITHUB_OUTPUT
-            echo "apk=OmniHub-nightly.apk" >> $GITHUB_OUTPUT
+            echo "tag=v${VN}-nightly.${{ github.run_number }}" >> $GITHUB_OUTPUT
+            echo "name=OmniHub ${VN} Nightly #${{ github.run_number }}" >> $GITHUB_OUTPUT
+            echo "apk=OmniHub-${VN}-nightly.apk" >> $GITHUB_OUTPUT
             echo "prerelease=true" >> $GITHUB_OUTPUT
+            echo "make_latest=true" >> $GITHUB_OUTPUT
           fi
 
       - name: Build Release APK
@@ -106,22 +116,20 @@ jobs:
           tag_name: ${{ steps.meta.outputs.tag }}
           name: ${{ steps.meta.outputs.name }}
           prerelease: ${{ steps.meta.outputs.prerelease }}
-          make_latest: ${{ steps.meta.outputs.channel == 'stable' }}
+          make_latest: true
           body: |
             ## ${{ steps.meta.outputs.name }}
 
+            App versionName: **${{ steps.ver.outputs.version }}**
             Channel: **${{ steps.meta.outputs.channel }}**
 
-            Fix / main builds ship as **Nightly** (no new milestone version).
-            Stable milestones are published only when channel=stable.
+            ### WebCore 1.0.8.2
+            - Spatial Send button sensing (nearest control to the right of the input)
+            - Multi-strategy submit: attr selectors, pointer events, form.requestSubmit, Enter
+            - Verifies message left the input box
+            - Human-like / ProseMirror-friendly fill
 
-            ### Chat audit (current)
-            - **ChatGPT**: real path (web session cookies → token → conversation)
-            - **Other WEB sources**: install + sign-in only; chat protocol not fully wired
-            - **MCP**: session stub, not full tool runtime
-            - **Auth model**: web cookies / session — not API keys in UI
-
-            Install the APK attached to this release.
+            Install the APK attached to this release (not the old v1.0.7 asset).
           files: ${{ steps.meta.outputs.apk }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
