@@ -18,10 +18,6 @@ import org.json.JSONObject
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 
-/**
- * Web Core: send the user message through the provider session and return the
- * assistant text. No fake "relayed / streaming" demo strings.
- */
 object ProviderBridge {
 
     data class StreamToken(val text: String, val done: Boolean = false)
@@ -52,16 +48,13 @@ object ProviderBridge {
                     runMcpAction(context, providerId, providerName, siteUrl, last)
                 providerId.contains("chatgpt", true) || siteUrl.contains("chatgpt.com") ->
                     chatGpt(context, providerId, messages)
-                providerId.contains("claude", true) || siteUrl.contains("claude.ai") ->
-                    genericWebChat(context, providerId, siteUrl, "claude.ai", messages)
                 else ->
-                    genericWebChat(context, providerId, siteUrl, hostOf(siteUrl), messages)
+                    genericWebChat(context, providerId, providerName, siteUrl, hostOf(siteUrl), messages)
             }
         } catch (e: Exception) {
-            e.message ?: "Request failed"
+            "Could not reach $providerName: ${e.javaClass.simpleName} ${e.message ?: ""}".trim()
         }
 
-        // Deliver the full reply as one message (not a simulated typewriter)
         emit(StreamToken(reply, done = true))
     }
 
@@ -103,15 +96,12 @@ object ProviderBridge {
         }
     }
 
-    /** ChatGPT web backend using session cookies / access token from login WebView. */
     private fun chatGpt(context: Context, providerId: String, messages: List<ChatMessage>): String {
         val cookies = cookieHeader(context, providerId, "chatgpt.com")
         if (cookies.isBlank()) {
-            // Guest path: still try; many pages redirect to login
-            return tryGuestOrFail("chatgpt.com", messages.last().content)
+            return "Sign in to ChatGPT under Providers, then send again."
         }
 
-        // 1) Session → accessToken
         val sessionReq = Request.Builder()
             .url("https://chatgpt.com/api/auth/session")
             .header("Cookie", cookies)
@@ -123,10 +113,9 @@ object ProviderBridge {
         val access = runCatching { JSONObject(sessionBody).optString("accessToken") }.getOrNull().orEmpty()
 
         if (access.isBlank()) {
-            return "Sign in to ChatGPT in Providers, then try again."
+            return "ChatGPT session expired. Open Providers → Sign in again."
         }
 
-        // 2) Conversation
         val userText = messages.lastOrNull { it.role == "user" }?.content.orEmpty()
         val payload = JSONObject()
             .put("action", "next")
@@ -155,18 +144,17 @@ object ProviderBridge {
 
         val raw = http.newCall(convReq).execute().use { resp ->
             if (!resp.isSuccessful) {
-                return "ChatGPT error ${resp.code}. Sign in again if this keeps happening."
+                return "ChatGPT returned ${resp.code}. Sign in again if this continues."
             }
             resp.body?.string().orEmpty()
         }
 
         return parseSseOrJsonReply(raw).ifBlank {
-            "No text in ChatGPT response. Try signing in again."
+            "ChatGPT returned no text. Try again or sign in again."
         }
     }
 
     private fun parseSseOrJsonReply(raw: String): String {
-        // SSE: data: {...} lines with message content parts
         val parts = mutableListOf<String>()
         raw.lineSequence().forEach { line ->
             val t = line.trim()
@@ -183,8 +171,6 @@ object ProviderBridge {
             }
         }
         if (parts.isNotEmpty()) return parts.last()
-
-        // Plain JSON fallback
         runCatching {
             val o = JSONObject(raw)
             val msg = o.optJSONObject("message")
@@ -198,44 +184,35 @@ object ProviderBridge {
     private fun genericWebChat(
         context: Context,
         providerId: String,
+        providerName: String,
         siteUrl: String,
         host: String,
         messages: List<ChatMessage>
     ): String {
         val cookies = cookieHeader(context, providerId, host)
-        val userText = messages.lastOrNull { it.role == "user" }?.content.orEmpty()
+        if (cookies.isBlank()) {
+            return "Sign in to $providerName under Providers, then send again."
+        }
 
-        // Probe the site with the session to confirm connectivity
         val req = Request.Builder()
-            .url(siteUrl)
+            .url(siteUrl.ifBlank { "https://$host" })
             .header("User-Agent", UA)
             .header("Accept", "text/html,application/json")
-            .apply { if (cookies.isNotBlank()) header("Cookie", cookies) }
+            .header("Cookie", cookies)
             .get()
             .build()
 
-        val (code, body) = http.newCall(req).execute().use { resp ->
-            resp.code to resp.body?.string().orEmpty().take(500)
+        val code = try {
+            http.newCall(req).execute().use { it.code }
+        } catch (e: Exception) {
+            return "Network error talking to $providerName: ${e.message}"
         }
 
-        if (code in 200..399 && cookies.isNotBlank()) {
-            // Session is live; provider-specific protocol adapters ship as Source APK updates.
-            // Until that adapter is installed, be honest — do not invent an AI answer.
-            return "Connected to $host (session ok). " +
-                "Install the $providerId source from Store for full chat protocol, " +
-                "or use ChatGPT which is wired in-core."
+        if (code in 200..399) {
+            return "$providerName session is active, but full chat protocol for this provider is not wired yet. " +
+                "ChatGPT is fully wired — use ChatGPT for real replies, or wait for the next source update."
         }
-
-        if (cookies.isBlank()) {
-            return tryGuestOrFail(host, userText)
-        }
-
-        return "Could not reach $host (HTTP $code). Check network or sign in again."
-    }
-
-    private fun tryGuestOrFail(host: String, userText: String): String {
-        // Honest: without a session most providers will not return model output.
-        return "Open Providers → sign in to $host, then send again."
+        return "$providerName returned HTTP $code. Sign in again."
     }
 
     private fun runMcpAction(
@@ -247,10 +224,9 @@ object ProviderBridge {
     ): String {
         val cookies = cookieHeader(context, providerId, hostOf(siteUrl))
         if (cookies.isBlank()) {
-            return "Sign in to $providerName first so MCP can use the site session."
+            return "Sign in to $providerName first."
         }
-        return "MCP session on $providerName is ready. Task queued: ${task.take(200)}. " +
-            "Full UI-action adapters ship with the MCP source APK from Store."
+        return "MCP session ready on $providerName. Task: ${task.take(200)}"
     }
 
     private const val UA =
