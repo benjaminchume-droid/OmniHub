@@ -1,6 +1,7 @@
 package com.omnihub.ui.screens
 
 import android.net.Uri
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -46,6 +47,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.Calendar
+import java.util.concurrent.atomic.AtomicInteger
 
 data class ChatBubble(val role: String, val content: String)
 
@@ -91,6 +93,8 @@ fun ChatScreen(
     var messages by remember { mutableStateOf(listOf<ChatBubble>()) }
     var input by remember { mutableStateOf("") }
     var sending by remember { mutableStateOf(false) }
+    // Blocks background reloads from wiping the active reply
+    val loadGate = remember { AtomicInteger(0) }
     var conversations by remember { mutableStateOf(listOf<ConversationEntity>()) }
     var projects by remember { mutableStateOf(listOf<com.omnihub.history.ProjectEntity>()) }
     var incognito by remember { mutableStateOf(UserPrefs.isIncognito(context)) }
@@ -104,6 +108,7 @@ fun ChatScreen(
     var showRename by remember { mutableStateOf(false) }
     var showProjectPicker by remember { mutableStateOf(false) }
     var updateInfo by remember { mutableStateOf<AppUpdateInfo?>(null) }
+    var updating by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
     val sources by app.sourceManager.sources.collectAsState()
 
@@ -119,14 +124,19 @@ fun ChatScreen(
         convPrefs.edit().putString("active_conv_id", id).apply()
     }
 
-    fun loadMessages(id: String?) {
+    fun loadMessages(id: String?, force: Boolean = false) {
+        if (!force && (sending || loadGate.get() > 0)) return
         if (id == null || incognito) {
-            if (!sending) messages = emptyList()
+            if (!sending && loadGate.get() == 0) messages = emptyList()
             return
         }
+        val gate = loadGate.get()
         scope.launch {
             val list = withContext(Dispatchers.IO) { app.chatRepo.getMessages(id) }
-            if (!sending) messages = list.map { ChatBubble(it.role, it.content) }
+            // ignore stale reloads
+            if (!force && (sending || loadGate.get() != gate)) return@launch
+            if (id != currentConvId && !force) return@launch
+            messages = list.map { ChatBubble(it.role, it.content) }
         }
     }
 
@@ -153,7 +163,7 @@ fun ChatScreen(
         val obs = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 app.sourceManager.reload()
-                loadMessages(currentConvId)
+                if (!sending) loadMessages(currentConvId)
             }
         }
         lifecycleOwner.lifecycle.addObserver(obs)
@@ -163,16 +173,16 @@ fun ChatScreen(
     LaunchedEffect(Unit) {
         greeting = timeGreeting(UserPrefs.getName(context))
         app.sourceManager.reload()
-        loadMessages(currentConvId)
+        loadMessages(currentConvId, force = true)
         launch { app.chatRepo.observeConversations().collect { conversations = it } }
         launch { app.chatRepo.observeProjects().collect { projects = it } }
         launch {
-            updateInfo = runCatching { AppUpdateChecker.checkOmniHub() }.getOrNull()
+            updateInfo = runCatching { AppUpdateChecker.checkOmniHub(context) }.getOrNull()
         }
     }
 
     LaunchedEffect(currentConvId) {
-        if (!sending) loadMessages(currentConvId)
+        if (!sending) loadMessages(currentConvId, force = true)
     }
 
     fun send() {
@@ -184,11 +194,14 @@ fun ChatScreen(
         pendingAttachments = emptyList()
         keyboard?.hide()
         sending = true
+        loadGate.incrementAndGet()
+
+        // Optimistic UI immediately so nothing "flashes empty"
+        messages = messages + ChatBubble("user", userText) + ChatBubble("assistant", "")
 
         scope.launch {
+            var convId = currentConvId
             try {
-                // SAVE FIRST so history never loses the user message
-                var convId = currentConvId
                 if (!incognito) {
                     if (convId == null) {
                         convId = withContext(Dispatchers.IO) {
@@ -199,25 +212,18 @@ fun ChatScreen(
                     withContext(Dispatchers.IO) {
                         app.chatRepo.addMessage(convId!!, "user", userText)
                     }
-                    // reload from DB so UI matches storage
-                    val saved = withContext(Dispatchers.IO) { app.chatRepo.getMessages(convId!!) }
-                    messages = saved.map { ChatBubble(it.role, it.content) } + ChatBubble("assistant", "")
-                } else {
-                    messages = messages + ChatBubble("user", userText) + ChatBubble("assistant", "")
                 }
 
-                val hist = messages.filter { it.content.isNotBlank() || it.role == "user" }
+                val hist = messages
+                    .filter { !(it.role == "assistant" && it.content.isBlank()) }
                     .map { ChatMessage(it.role, it.content) }
+
                 val preferredId = if (preferred == "auto") null else preferred
                 val target = preferredId?.let { app.sourceManager.get(it) }
                     ?: app.sourceManager.all().firstOrNull()
 
-                if (target == null) {
-                    val err = "No source installed. Open Store → install → Providers → Sign in."
-                    messages = messages.dropLast(1) + ChatBubble("assistant", err)
-                    if (!incognito && convId != null) {
-                        withContext(Dispatchers.IO) { app.chatRepo.addMessage(convId, "assistant", err) }
-                    }
+                val reply: String = if (target == null) {
+                    "No source installed. Open Store → install → Providers → Sign in."
                 } else {
                     val buf = StringBuilder()
                     ProviderBridge.streamChat(
@@ -230,23 +236,28 @@ fun ChatScreen(
                     ).collect { tok ->
                         if (tok.text.isNotEmpty()) {
                             buf.append(tok.text)
+                            // keep user bubbles; only replace trailing assistant
                             messages = messages.dropLast(1) + ChatBubble("assistant", buf.toString())
                         }
                     }
-                    val final = buf.toString().ifBlank { "No reply." }
-                    if (!incognito && convId != null) {
-                        withContext(Dispatchers.IO) { app.chatRepo.addMessage(convId, "assistant", final) }
-                        val saved = withContext(Dispatchers.IO) { app.chatRepo.getMessages(convId) }
-                        messages = saved.map { ChatBubble(it.role, it.content) }
-                    } else {
-                        messages = messages.dropLast(1) + ChatBubble("assistant", final)
+                    buf.toString().ifBlank { "No reply." }
+                }
+
+                // Final UI state — never clear after this
+                messages = messages.dropLast(1) + ChatBubble("assistant", reply)
+
+                if (!incognito && convId != null) {
+                    withContext(Dispatchers.IO) {
+                        app.chatRepo.addMessage(convId, "assistant", reply)
                     }
-                    runCatching { app.soul.learnFromExchange(target.info.id, hist, final, convId) }
+                }
+                if (target != null) {
+                    runCatching { app.soul.learnFromExchange(target.info.id, hist, reply, convId) }
                 }
             } catch (e: Exception) {
                 val err = e.message?.takeIf { it.isNotBlank() } ?: "Something went wrong."
                 messages = messages.dropLast(1) + ChatBubble("assistant", err)
-                val cid = currentConvId
+                val cid = convId ?: currentConvId
                 if (!incognito && cid != null) {
                     runCatching {
                         withContext(Dispatchers.IO) { app.chatRepo.addMessage(cid, "assistant", err) }
@@ -254,6 +265,7 @@ fun ChatScreen(
                 }
             } finally {
                 sending = false
+                loadGate.decrementAndGet()
             }
         }
     }
@@ -281,7 +293,7 @@ fun ChatScreen(
                                         onClick = {
                                             if (!incognito) {
                                                 persistActive(conv.id)
-                                                loadMessages(conv.id)
+                                                loadMessages(conv.id, force = true)
                                                 scope.launch { drawerState.close() }
                                             }
                                         },
@@ -296,7 +308,7 @@ fun ChatScreen(
                             onClick = {
                                 if (!incognito) {
                                     persistActive(conv.id)
-                                    loadMessages(conv.id)
+                                    loadMessages(conv.id, force = true)
                                     scope.launch { drawerState.close() }
                                 }
                             }
@@ -365,15 +377,38 @@ fun ChatScreen(
         ) { padding ->
             Column(Modifier.fillMaxSize().padding(padding)) {
                 updateInfo?.let { info ->
-                    Surface(color = OmniAmber.copy(alpha = 0.2f), modifier = Modifier.fillMaxWidth().clickable {
-                        AppUpdateChecker.openReleasePage(context, info)
-                    }) {
+                    Surface(color = OmniAmber.copy(alpha = 0.2f), modifier = Modifier.fillMaxWidth()) {
                         Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Column(Modifier.weight(1f)) {
-                                Text("Update available: ${info.tag}", fontWeight = FontWeight.SemiBold, color = OmniAmber)
+                            Column(Modifier.weight(1f).clickable {
+                                // show body toast / expand later
+                            }) {
+                                Text("Update: ${info.tag}", fontWeight = FontWeight.SemiBold, color = OmniAmber)
                                 Text(info.name, style = MaterialTheme.typography.labelSmall, maxLines = 1)
                             }
-                            Text("What's new", color = OmniAmber, fontWeight = FontWeight.Bold)
+                            TextButton(onClick = {
+                                AppUpdateChecker.dismiss(context, info.tag)
+                                updateInfo = null
+                            }) { Text("Later") }
+                            Button(
+                                onClick = {
+                                    if (updating) return@Button
+                                    if (info.apkUrl.isNullOrBlank()) {
+                                        Toast.makeText(context, "No APK on this release", Toast.LENGTH_SHORT).show()
+                                        return@Button
+                                    }
+                                    updating = true
+                                    scope.launch {
+                                        val r = AppUpdateChecker.downloadAndInstall(context, info)
+                                        updating = false
+                                        r.onFailure {
+                                            Toast.makeText(context, it.message ?: "Update failed", Toast.LENGTH_LONG).show()
+                                        }
+                                        if (r.isSuccess) updateInfo = null
+                                    }
+                                },
+                                enabled = !updating,
+                                colors = ButtonDefaults.buttonColors(containerColor = OmniAmber, contentColor = Color.Black)
+                            ) { Text(if (updating) "…" else "Update") }
                         }
                     }
                 }
@@ -411,7 +446,8 @@ fun ChatScreen(
                                 verticalArrangement = Arrangement.spacedBy(8.dp),
                                 contentPadding = PaddingValues(vertical = 12.dp)
                             ) {
-                                items(messages) { msg ->
+                                items(messages.size) { idx ->
+                                    val msg = messages[idx]
                                     val mine = msg.role == "user"
                                     Row(Modifier.fillMaxWidth(), horizontalArrangement = if (mine) Arrangement.End else Arrangement.Start) {
                                         Surface(
@@ -431,14 +467,13 @@ fun ChatScreen(
         }
     }
 
-    // Long-press conversation menu
     menuConv?.let { conv ->
         AlertDialog(
             onDismissRequest = { menuConv = null },
             title = { Text(conv.title, maxLines = 2, overflow = TextOverflow.Ellipsis) },
             text = {
                 Column {
-                    TextButton(onClick = { showRename = true; menuConv = conv }) { Text("Rename") }
+                    TextButton(onClick = { showRename = true }) { Text("Rename") }
                     TextButton(onClick = {
                         scope.launch {
                             app.chatRepo.setPinned(conv.id, !conv.isPinned)
@@ -457,9 +492,7 @@ fun ChatScreen(
                     }
                 }
             },
-            confirmButton = {
-                TextButton(onClick = { menuConv = null }) { Text("Close") }
-            }
+            confirmButton = { TextButton(onClick = { menuConv = null }) { Text("Close") } }
         )
     }
 
@@ -467,9 +500,7 @@ fun ChatScreen(
         AlertDialog(
             onDismissRequest = { showRename = false },
             title = { Text("Rename") },
-            text = {
-                OutlinedTextField(value = renameText, onValueChange = { renameText = it }, singleLine = true)
-            },
+            text = { OutlinedTextField(value = renameText, onValueChange = { renameText = it }, singleLine = true) },
             confirmButton = {
                 TextButton(onClick = {
                     val id = menuConv!!.id
