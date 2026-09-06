@@ -12,8 +12,9 @@ android {
         applicationId = "com.omnihub"
         minSdk = 26
         targetSdk = 35
-        versionCode = 8
-        versionName = "1.0.7"
+        // Milestone stays 1.0.7; CI fix builds are Nightlies (same base, rising versionCode)
+        versionCode = 9
+        versionName = "1.0.7-nightly"
     }
 
     signingConfigs {

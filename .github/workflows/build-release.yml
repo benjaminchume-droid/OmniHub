@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      channel:
+        description: 'nightly (default) or stable'
+        required: false
+        default: 'nightly'
 
 permissions:
   contents: write
@@ -58,6 +63,27 @@ jobs:
             echo "keyPassword=${{ secrets.KEY_PASSWORD }}"
           } > keystore.properties
 
+      - name: Decide channel
+        id: meta
+        run: |
+          CHANNEL="${{ github.event.inputs.channel }}"
+          if [ -z "$CHANNEL" ]; then CHANNEL=nightly; fi
+          # pushes to main are always nightly fix builds
+          if [ "${{ github.event_name }}" = "push" ]; then CHANNEL=nightly; fi
+          echo "channel=$CHANNEL" >> $GITHUB_OUTPUT
+          DAY=$(date -u +%Y%m%d)
+          if [ "$CHANNEL" = "stable" ]; then
+            echo "tag=v1.0.7-${{ github.run_number }}" >> $GITHUB_OUTPUT
+            echo "name=OmniHub v1.0.7 (build ${{ github.run_number }})" >> $GITHUB_OUTPUT
+            echo "apk=OmniHub-v1.0.7.apk" >> $GITHUB_OUTPUT
+            echo "prerelease=false" >> $GITHUB_OUTPUT
+          else
+            echo "tag=nightly-$DAY-${{ github.run_number }}" >> $GITHUB_OUTPUT
+            echo "name=OmniHub Nightly $DAY #${{ github.run_number }}" >> $GITHUB_OUTPUT
+            echo "apk=OmniHub-nightly.apk" >> $GITHUB_OUTPUT
+            echo "prerelease=true" >> $GITHUB_OUTPUT
+          fi
+
       - name: Build Release APK
         run: |
           set -o pipefail
@@ -66,37 +92,36 @@ jobs:
           test -n "$APK"
           SIZE=$(wc -c < "$APK")
           test "$SIZE" -gt 500000
-          cp "$APK" "./OmniHub-v1.0.7.apk"
-          ls -lah ./OmniHub-v1.0.7.apk
+          cp "$APK" "./${{ steps.meta.outputs.apk }}"
+          ls -lah "./${{ steps.meta.outputs.apk }}"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: OmniHub-1.0.7-apk
-          path: OmniHub-v1.0.7.apk
+          name: ${{ steps.meta.outputs.apk }}
+          path: ${{ steps.meta.outputs.apk }}
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.0.7-${{ github.run_number }}
-          name: OmniHub v1.0.7 (build ${{ github.run_number }})
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: ${{ steps.meta.outputs.name }}
+          prerelease: ${{ steps.meta.outputs.prerelease }}
+          make_latest: ${{ steps.meta.outputs.channel == 'stable' }}
           body: |
-            ## OmniHub v1.0.7 — chat path hardening
+            ## ${{ steps.meta.outputs.name }}
 
-            ### Why messages showed only errors
-            1. Sign-in cookies were only taken from one URL (auth domains missed)
-            2. Installed source packages sometimes had no website URL → wrong provider path
-            3. ChatGPT request lacked device headers
+            Channel: **${{ steps.meta.outputs.channel }}**
 
-            ### Fixes
-            - Multi-domain cookie harvest (chatgpt.com + auth.openai.com + …)
-            - Known provider URL map for installed APKs
-            - ChatGPT session + conversation headers improved
-            - Clearer on-screen errors (sign-in / token / HTTP code)
+            Fix / main builds ship as **Nightly** (no new milestone version).
+            Stable milestones are published only when channel=stable.
 
-            **Install this APK.** Settings must show **1.0.7**.
+            ### Chat audit (current)
+            - **ChatGPT**: real path (web session cookies → token → conversation)
+            - **Other WEB sources**: install + sign-in only; chat protocol not fully wired
+            - **MCP**: session stub, not full tool runtime
+            - **Auth model**: web cookies / session — not API keys in UI
 
-            Then: Providers → ChatGPT → Sign in → wait for chat UI → Back → send a message.
-          files: OmniHub-v1.0.7.apk
-          make_latest: true
+            Install the APK attached to this release.
+          files: ${{ steps.meta.outputs.apk }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
