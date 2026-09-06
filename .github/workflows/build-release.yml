@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Release version (e.g. 1.0.2)'
+        description: 'Release version (e.g. 1.0.3)'
         required: false
-        default: '1.0.2'
+        default: '1.0.3'
 
 permissions:
   contents: write
@@ -33,8 +33,10 @@ jobs:
         run: |
           set -e
           mkdir -p gradle/wrapper
-          curl -fsSL -o gradle/wrapper/gradle-wrapper.jar "https://raw.githubusercontent.com/gradle/gradle/v8.7.0/gradle/wrapper/gradle-wrapper.jar"
-          curl -fsSL -o gradlew "https://raw.githubusercontent.com/gradle/gradle/v8.7.0/gradlew"
+          curl -fsSL -o gradle/wrapper/gradle-wrapper.jar \
+            "https://raw.githubusercontent.com/gradle/gradle/v8.7.0/gradle/wrapper/gradle-wrapper.jar"
+          curl -fsSL -o gradlew \
+            "https://raw.githubusercontent.com/gradle/gradle/v8.7.0/gradlew"
           chmod +x gradlew
           printf '%s\n' \
             'distributionBase=GRADLE_USER_HOME' \
@@ -45,8 +47,9 @@ jobs:
             'zipStoreBase=GRADLE_USER_HOME' \
             'zipStorePath=wrapper/dists' \
             > gradle/wrapper/gradle-wrapper.properties
+          test $(wc -c < gradlew) -gt 5000
+          test $(wc -c < gradle/wrapper/gradle-wrapper.jar) -gt 20000
           ls -la gradlew gradle/wrapper/
-          wc -c gradlew gradle/wrapper/gradle-wrapper.jar
 
       - name: Decode Keystore
         env:
@@ -55,16 +58,21 @@ jobs:
         run: |
           if [ -n "$KEYSTORE_BASE64" ]; then
             echo "$KEYSTORE_BASE64" | base64 --decode > keystore.jks
-            echo "storeFile=keystore.jks" > keystore.properties
-            echo "storePassword=${{ secrets.KEYSTORE_PASSWORD }}" >> keystore.properties
-            echo "keyAlias=${{ secrets.KEY_ALIAS }}" >> keystore.properties
-            echo "keyPassword=${{ secrets.KEY_PASSWORD }}" >> keystore.properties
+            {
+              echo "storeFile=keystore.jks"
+              echo "storePassword=${{ secrets.KEYSTORE_PASSWORD }}"
+              echo "keyAlias=${{ secrets.KEY_ALIAS }}"
+              echo "keyPassword=${{ secrets.KEY_PASSWORD }}"
+            } > keystore.properties
+            ls -la keystore.jks
           elif [ -n "$KEYSTORE" ]; then
             echo "$KEYSTORE" | base64 --decode > keystore.jks
-            echo "storeFile=keystore.jks" > keystore.properties
-            echo "storePassword=${{ secrets.KEYSTORE_PASSWORD }}" >> keystore.properties
-            echo "keyAlias=${{ secrets.KEY_ALIAS }}" >> keystore.properties
-            echo "keyPassword=${{ secrets.KEY_PASSWORD }}" >> keystore.properties
+            {
+              echo "storeFile=keystore.jks"
+              echo "storePassword=${{ secrets.KEYSTORE_PASSWORD }}"
+              echo "keyAlias=${{ secrets.KEY_ALIAS }}"
+              echo "keyPassword=${{ secrets.KEY_PASSWORD }}"
+            } > keystore.properties
           else
             echo "WARNING: No keystore — unsigned release APK"
           fi
@@ -75,14 +83,16 @@ jobs:
           set -o pipefail
           ./gradlew --version
           set +e
-          ./gradlew clean assembleRelease --stacktrace 2>&1 | tee build.log
+          ./gradlew clean assembleRelease --stacktrace --warning-mode all 2>&1 | tee build.log
           STATUS=${PIPESTATUS[0]}
           set -e
           echo "---- Gradle exit: $STATUS ----"
-          echo "---- Errors ----"
-          grep -E "^e: |Unresolved reference|is not abstract|Conflicting overloads|error:" build.log | tail -120 || true
+          echo "---- Last 80 log lines ----"
+          tail -80 build.log || true
+          echo "---- Kotlin errors ----"
+          grep -E "^e: |Unresolved reference|is not abstract|Conflicting|error:|FAILURE:" build.log | tail -150 || true
           echo "---- APK search ----"
-          find app/build/outputs -type f -name "*.apk" -exec ls -lah {} \; || true
+          find app/build -type f -name "*.apk" -exec ls -lah {} \; 2>/dev/null || true
           APK=$(find app/build/outputs/apk -type f -name "*.apk" 2>/dev/null | head -n 1 || true)
           if [ -z "$APK" ] || [ ! -f "$APK" ]; then
             echo "FATAL: No APK produced (gradle status=$STATUS)"
@@ -94,15 +104,16 @@ jobs:
             echo "FATAL: APK too small ($SIZE bytes)"
             exit 1
           fi
-          cp "$APK" "./OmniHub-v1.0.2.apk"
-          ls -lah ./OmniHub-v1.0.2.apk
+          cp "$APK" "./OmniHub-v1.0.3.apk"
+          echo "apk_path=OmniHub-v1.0.3.apk" >> "$GITHUB_OUTPUT"
+          ls -lah ./OmniHub-v1.0.3.apk
           exit $STATUS
         env:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
 
-      - name: Upload build log (always)
+      - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -110,22 +121,27 @@ jobs:
           path: build.log
           if-no-files-found: warn
 
-      - name: Upload APK artifact
+      - name: Upload APK
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: OmniHub-1.0.2-apk
-          path: OmniHub-v1.0.2.apk
+          name: OmniHub-1.0.3-apk
+          path: OmniHub-v1.0.3.apk
           if-no-files-found: error
 
       - name: Create GitHub Release
         if: success()
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.0.2
-          name: OmniHub v1.0.2
-          body_path: CHANGELOG.md
-          files: OmniHub-v1.0.2.apk
+          tag_name: v1.0.3-${{ github.run_number }}
+          name: OmniHub v1.0.3 (build ${{ github.run_number }})
+          body: |
+            ## OmniHub v1.0.3
+            - OmniSource Store (Web / MCP)
+            - Incognito, file/image attach
+            - Omni folder + terminal foundation
+            - API key UI removed
+          files: OmniHub-v1.0.3.apk
           draft: false
           prerelease: false
           generate_release_notes: true
