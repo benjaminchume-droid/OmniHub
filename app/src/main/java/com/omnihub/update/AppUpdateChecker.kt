@@ -80,27 +80,25 @@ object AppUpdateChecker {
             if (apkUrl.isNullOrBlank()) continue
             if (tag == installedTag || tag == dismissed) continue
 
-            // Compare semantic 1.x.x.x OR treat newer nightly tag as update
-            val tagVersion = tag
-                .removePrefix("v")
-                .substringAfter("nightly-", tag)
-                .let {
-                    if (it.matches(Regex("\\d+\\.\\d+.*"))) it
-                    else rel.optString("name").ifBlank { tag }
-                }
+            val extracted = extractVersion(tag) ?: extractVersion(rel.optString("name"))
+            val candidateNewer = extracted != null && isNewer(extracted, local)
+            val isNightlyTag = tag.contains("nightly", true)
+            val nightlyNew = isNightlyTag && tag != installedTag &&
+                (extracted == null || isNewer(extracted, local) || extracted == local)
 
-            val newer = isNewer(tagVersion, local) || isNewer(tag, local)
-            if (!newer && tag == local) continue
-            if (!newer && !tag.startsWith("nightly", true) && !tag.contains(local.substringBeforeLast('.'))) {
-                // still allow if remote tag literally contains higher version
-                if (!isNewer(extractVersion(tag) ?: tag, local)) continue
+            // Prefer explicit higher version; also surface new nightly builds of same/higher base
+            if (!candidateNewer && !(isNightlyTag && tag != installedTag && isNewer(extracted ?: "0", local))) {
+                if (!candidateNewer && !isNightlyTag) continue
+                if (isNightlyTag && extracted != null && !isNewer(extracted, local) && extracted != local) continue
+                if (!candidateNewer && isNightlyTag && installedTag == tag) continue
+                if (!candidateNewer && !nightlyNew && extracted != null && !isNewer(extracted, local)) continue
             }
-            if (!newer && !tag.startsWith("nightly", true)) continue
-
-            // Prefer any release with APK that is newer than local versionName
-            val candidateNewer = isNewer(extractVersion(tag) ?: tagVersion, local)
-            val isNightlyNewer = tag.startsWith("nightly", true) && tag != installedTag
-            if (!candidateNewer && !isNightlyNewer) continue
+            if (!candidateNewer && isNightlyTag && installedTag.isNotBlank() && tag == installedTag) continue
+            if (!candidateNewer && !isNightlyTag) continue
+            if (!candidateNewer && isNightlyTag) {
+                // allow if version in tag is >= local
+                if (extracted != null && isNewer(local, extracted)) continue
+            }
 
             return@withContext AppUpdateInfo(
                 tag = tag,
@@ -114,7 +112,6 @@ object AppUpdateChecker {
         null
     }
 
-    /** Check OmniHub-Sources releases for newer APKs matching installed packages. */
     suspend fun checkSourceUpdates(
         context: Context,
         owner: String = "benjaminchume-droid",
@@ -143,7 +140,6 @@ object AppUpdateChecker {
                 val name = a.optString("name")
                 if (!name.endsWith(".apk", true)) continue
                 val apkUrl = a.optString("browser_download_url")
-                // name pattern: chatgpt-1.0.0.apk or chatgpt-1.0.0.1.apk
                 val base = name.removeSuffix(".apk")
                 val idGuess = base.substringBeforeLast("-").ifBlank { base }
                 val remoteVer = base.substringAfterLast("-", "1.0.0")
@@ -227,34 +223,45 @@ object AppUpdateChecker {
         )
     }
 
-    suspend fun downloadAndInstall(context: Context, info: AppUpdateInfo): Result<Unit> =
-        withContext(Dispatchers.IO) {
-            val url = info.apkUrl
-                ?: return@withContext Result.failure(IllegalStateException("No APK asset"))
-            runCatching {
-                val file = ApkInstaller.downloadApk(context, url, "OmniHub-update.apk")
-                markInstalled(context, info.tag)
-                withContext(Dispatchers.Main) {
-                    ApkInstaller.promptInstall(context, file)
-                    Toast.makeText(context, "Install the update when prompted", Toast.LENGTH_LONG).show()
-                }
+    suspend fun downloadAndInstall(
+        context: Context,
+        info: AppUpdateInfo,
+        onProgress: ((ApkInstaller.DownloadProgress) -> Unit)? = null
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        val url = info.apkUrl
+            ?: return@withContext Result.failure(IllegalStateException("No APK asset"))
+        runCatching {
+            val file = ApkInstaller.downloadApk(
+                context = context,
+                apkUrl = url,
+                fileName = "OmniHub-update.apk",
+                onProgress = onProgress
+            )
+            markInstalled(context, info.tag)
+            withContext(Dispatchers.Main) {
+                ApkInstaller.promptInstall(context, file)
+                Toast.makeText(context, "Install the update when prompted", Toast.LENGTH_LONG).show()
             }
         }
+    }
 
-    suspend fun downloadAndInstallSource(context: Context, info: SourceUpdateInfo): Result<Unit> =
-        withContext(Dispatchers.IO) {
-            runCatching {
-                val file = ApkInstaller.downloadApk(
-                    context, info.apkUrl, "${info.sourceId}-update.apk"
-                )
-                withContext(Dispatchers.Main) {
-                    ApkInstaller.promptInstall(context, file)
-                    Toast.makeText(
-                        context,
-                        "Update ${info.sourceId} ${info.remoteVersion}",
-                        Toast.LENGTH_LONG
-                    ).show()
-                }
+    suspend fun downloadAndInstallSource(
+        context: Context,
+        info: SourceUpdateInfo,
+        onProgress: ((ApkInstaller.DownloadProgress) -> Unit)? = null
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            val file = ApkInstaller.downloadApk(
+                context, info.apkUrl, "${info.sourceId}-update.apk", onProgress
+            )
+            withContext(Dispatchers.Main) {
+                ApkInstaller.promptInstall(context, file)
+                Toast.makeText(
+                    context,
+                    "Update ${info.sourceId} ${info.remoteVersion}",
+                    Toast.LENGTH_LONG
+                ).show()
             }
         }
+    }
 }
