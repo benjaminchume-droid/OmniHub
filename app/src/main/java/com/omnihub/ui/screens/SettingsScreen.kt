@@ -20,6 +20,7 @@ import com.omnihub.BuildConfig
 import com.omnihub.OmniHubApp
 import com.omnihub.data.SecureStore
 import com.omnihub.data.UserPrefs
+import com.omnihub.update.AppUpdateChecker
 import kotlinx.coroutines.launch
 import java.io.File
 
@@ -42,6 +43,8 @@ fun SettingsScreen(
     var personality by remember { mutableStateOf(UserPrefs.isPersonalityInsightsEnabled(context)) }
     var analyticsSummary by remember { mutableStateOf("Your Omni activity") }
     val omniFolder = remember { UserPrefs.getOmniFolder(context) ?: "Not set" }
+    var updateStatus by remember { mutableStateOf<String?>(null) }
+    var checkingUpdate by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         try {
@@ -172,6 +175,45 @@ fun SettingsScreen(
             )
 
             HorizontalDivider(Modifier.padding(vertical = 8.dp))
+            Text("Updates", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            ListItem(
+                headlineContent = { Text("Check for updates") },
+                supportingContent = {
+                    Text(updateStatus ?: "Looks for Nightly builds on GitHub")
+                },
+                leadingContent = { Icon(Icons.Default.SystemUpdate, null) },
+                trailingContent = {
+                    if (checkingUpdate) {
+                        CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                    } else {
+                        Icon(Icons.Default.ChevronRight, null)
+                    }
+                },
+                modifier = Modifier.clickable(enabled = !checkingUpdate) {
+                    checkingUpdate = true
+                    updateStatus = "Checking…"
+                    scope.launch {
+                        try {
+                            val info = AppUpdateChecker.checkOmniHub(context)
+                            if (info == null) {
+                                updateStatus = "You're on the latest build"
+                            } else {
+                                updateStatus = "Downloading ${info.tag}…"
+                                val result = AppUpdateChecker.downloadAndInstall(context, info)
+                                updateStatus = if (result.isSuccess) {
+                                    "Install when prompted (${info.tag})"
+                                } else {
+                                    result.exceptionOrNull()?.message ?: "Download failed"
+                                }
+                            }
+                        } catch (e: Exception) {
+                            updateStatus = e.message ?: "Check failed"
+                        } finally {
+                            checkingUpdate = false
+                        }
+                    }
+                }
+            )
             ListItem(
                 headlineContent = { Text("Version") },
                 supportingContent = { Text(BuildConfig.VERSION_NAME) },
