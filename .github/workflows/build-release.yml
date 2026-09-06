@@ -4,11 +4,6 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
-    inputs:
-      version:
-        description: 'Release version'
-        required: false
-        default: '1.0.5'
 
 permissions:
   contents: write
@@ -71,29 +66,38 @@ jobs:
           test -n "$APK"
           SIZE=$(wc -c < "$APK")
           test "$SIZE" -gt 500000
-          cp "$APK" "./OmniHub-v1.0.5.apk"
-          ls -lah ./OmniHub-v1.0.5.apk
+          cp "$APK" "./OmniHub-v1.0.6.apk"
+          ls -lah ./OmniHub-v1.0.6.apk
 
       - uses: actions/upload-artifact@v4
         with:
-          name: OmniHub-1.0.5-apk
-          path: OmniHub-v1.0.5.apk
+          name: OmniHub-1.0.6-apk
+          path: OmniHub-v1.0.6.apk
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.0.5-${{ github.run_number }}
-          name: OmniHub v1.0.5 (build ${{ github.run_number }})
+          tag_name: v1.0.6-${{ github.run_number }}
+          name: OmniHub v1.0.6 (build ${{ github.run_number }})
           body: |
-            ## OmniHub v1.0.5
-            - Providers = **installed sources only** (no hardcoded list)
-            - Store shows **Installed** vs Install
-            - Chat messages persist in Room across navigation
-            - Package visibility for OmniSource APKs
-            - Version name **1.0.5**
+            ## OmniHub v1.0.6
 
-            Install this APK. Settings must show **1.0.5**.
-          files: OmniHub-v1.0.5.apk
+            ### Critical fix
+            - **NetworkOnMainThreadException fixed** — chat network runs on IO thread
+
+            ### Chat
+            - Messages saved to Room **before** the reply (history no longer vanishes)
+            - Long-press a chat: **Rename / Pin / Add to project / Delete**
+
+            ### Updates
+            - In-app banner when a newer GitHub Release exists (opens changelog)
+
+            ### Sources
+            - Installed-only providers
+            - Store shows Installed
+
+            Install this APK. Settings must show **1.0.6**.
+          files: OmniHub-v1.0.6.apk
           make_latest: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
