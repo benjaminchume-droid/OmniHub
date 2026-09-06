@@ -6,10 +6,31 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+
+    <!-- See installed OmniSource packages on Android 11+ -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+        </intent>
+        <package android:name="com.omnisource.chatgpt" />
+        <package android:name="com.omnisource.claude" />
+        <package android:name="com.omnisource.gemini" />
+        <package android:name="com.omnisource.perplexity" />
+        <package android:name="com.omnisource.deepseek" />
+        <package android:name="com.omnisource.grok" />
+        <package android:name="com.omnisource.groq" />
+        <package android:name="com.omnisource.kimi" />
+        <package android:name="com.omnisource.zai" />
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="package" />
+        </intent>
+    </queries>
 
     <application
         android:name=".OmniHubApp"

@@ -78,7 +78,12 @@ fun OmniHubNav() {
         composable("connectors") { ConnectorsScreen(onBack = { navController.popBackStack() }) }
         composable("skills") { SkillsScreen(onBack = { navController.popBackStack() }) }
         composable("projects") { ProjectsScreen(onBack = { navController.popBackStack() }) }
-        composable("sources") { SourcesScreen(onBack = { navController.popBackStack() }) }
+        composable("sources") {
+            SourcesScreen(
+                onBack = { navController.popBackStack() },
+                onOpenStore = { navController.navigate("store") }
+            )
+        }
         composable("analytics") { AnalyticsScreen(onBack = { navController.popBackStack() }) }
         composable("store") { StoreScreen(onBack = { navController.popBackStack() }) }
         composable("file_explorer") { FileExplorerScreen(onBack = { navController.popBackStack() }) }

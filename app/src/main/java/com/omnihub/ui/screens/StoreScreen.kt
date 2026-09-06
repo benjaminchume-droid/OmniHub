@@ -7,6 +7,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Store
@@ -18,14 +19,20 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.omnihub.OmniHubApp
 import com.omnihub.source.extension.ApkInstaller
+import com.omnihub.source.extension.InstalledSourceScanner
 import com.omnihub.ui.theme.OmniAmber
 import kotlinx.coroutines.launch
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.compose.ui.platform.LocalLifecycleOwner
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun StoreScreen(onBack: () -> Unit) {
     val context = LocalContext.current
+    val app = context.applicationContext as OmniHubApp
     val scope = rememberCoroutineScope()
     var loading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -33,6 +40,7 @@ fun StoreScreen(onBack: () -> Unit) {
     var query by remember { mutableStateOf("") }
     var filter by remember { mutableStateOf("ALL") }
     var installing by remember { mutableStateOf<String?>(null) }
+    var refreshTick by remember { mutableStateOf(0) }
 
     fun load() {
         scope.launch {
@@ -41,19 +49,33 @@ fun StoreScreen(onBack: () -> Unit) {
             try {
                 items = ApkInstaller.fetchReleases()
                 if (items.isEmpty()) {
-                    error = "No source APKs in Releases yet. Run OmniHub-Sources factory to publish APKs."
+                    error = "No source APKs in Releases yet."
                 }
             } catch (e: Exception) {
                 error = e.message ?: "Failed to load releases"
                 items = emptyList()
             }
             loading = false
+            refreshTick++
+            app.sourceManager.reload()
         }
     }
 
     LaunchedEffect(Unit) { load() }
 
-    val filtered = remember(items, query, filter) {
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val obs = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                refreshTick++
+                app.sourceManager.reload()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(obs)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(obs) }
+    }
+
+    val filtered = remember(items, query, filter, refreshTick) {
         items.filter { s ->
             (filter == "ALL" || s.kind.equals(filter, true)) &&
                 (query.isBlank() || s.name.contains(query, true) || s.id.contains(query, true))
@@ -66,7 +88,7 @@ fun StoreScreen(onBack: () -> Unit) {
                 title = {
                     Column {
                         Text("OmniSource Store", fontWeight = FontWeight.SemiBold)
-                        Text("From GitHub Releases", style = MaterialTheme.typography.labelSmall)
+                        Text("GitHub Releases", style = MaterialTheme.typography.labelSmall)
                     }
                 },
                 navigationIcon = {
@@ -119,10 +141,15 @@ fun StoreScreen(onBack: () -> Unit) {
                     ) { Text("Retry") }
                 }
                 else -> LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items(filtered, key = { it.apkUrl }) { rel ->
+                    items(filtered, key = { it.apkUrl + refreshTick }) { rel ->
+                        val installed = InstalledSourceScanner.isSourceInstalled(context, rel.id)
                         Card(shape = RoundedCornerShape(14.dp), modifier = Modifier.fillMaxWidth()) {
                             Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-                                Icon(Icons.Default.CloudDownload, null, tint = OmniAmber)
+                                Icon(
+                                    if (installed) Icons.Default.CheckCircle else Icons.Default.CloudDownload,
+                                    null,
+                                    tint = OmniAmber
+                                )
                                 Spacer(Modifier.width(12.dp))
                                 Column(Modifier.weight(1f)) {
                                     Text(rel.name, fontWeight = FontWeight.SemiBold)
@@ -132,24 +159,36 @@ fun StoreScreen(onBack: () -> Unit) {
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
                                 }
-                                Button(
-                                    onClick = {
-                                        scope.launch {
-                                            installing = rel.id
-                                            try {
-                                                val file = ApkInstaller.downloadApk(context, rel.apkUrl, "${rel.id}.apk")
-                                                ApkInstaller.promptInstall(context, file)
-                                                Toast.makeText(context, "Allow install from this source if asked", Toast.LENGTH_LONG).show()
-                                            } catch (e: Exception) {
-                                                Toast.makeText(context, e.message ?: "Install failed", Toast.LENGTH_LONG).show()
-                                            } finally {
-                                                installing = null
+                                if (installed) {
+                                    OutlinedButton(onClick = { }, enabled = false) {
+                                        Text("Installed")
+                                    }
+                                } else {
+                                    Button(
+                                        onClick = {
+                                            scope.launch {
+                                                installing = rel.id
+                                                try {
+                                                    val file = ApkInstaller.downloadApk(context, rel.apkUrl, "${rel.id}.apk")
+                                                    ApkInstaller.promptInstall(context, file)
+                                                    Toast.makeText(
+                                                        context,
+                                                        "Finish install, then open Providers",
+                                                        Toast.LENGTH_LONG
+                                                    ).show()
+                                                } catch (e: Exception) {
+                                                    Toast.makeText(context, e.message ?: "Install failed", Toast.LENGTH_LONG).show()
+                                                } finally {
+                                                    installing = null
+                                                    refreshTick++
+                                                    app.sourceManager.reload()
+                                                }
                                             }
-                                        }
-                                    },
-                                    enabled = installing == null,
-                                    colors = ButtonDefaults.buttonColors(containerColor = OmniAmber, contentColor = Color.Black)
-                                ) { Text(if (installing == rel.id) "\u2026" else "Install") }
+                                        },
+                                        enabled = installing == null,
+                                        colors = ButtonDefaults.buttonColors(containerColor = OmniAmber, contentColor = Color.Black)
+                                    ) { Text(if (installing == rel.id) "…" else "Install") }
+                                }
                             }
                         }
                     }
