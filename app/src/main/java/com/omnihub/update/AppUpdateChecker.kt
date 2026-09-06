@@ -1,6 +1,8 @@
 package com.omnihub.update
 
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import android.widget.Toast
 import com.omnihub.BuildConfig
 import com.omnihub.source.extension.ApkInstaller
@@ -32,7 +34,7 @@ object AppUpdateChecker {
         owner: String = "benjaminchume-droid",
         repo: String = "OmniHub"
     ): AppUpdateInfo? = withContext(Dispatchers.IO) {
-        val url = "https://api.github.com/repos/$owner/$repo/releases?per_page=10"
+        val url = "https://api.github.com/repos/$owner/$repo/releases?per_page=15"
         val req = Request.Builder().url(url)
             .header("Accept", "application/vnd.github+json")
             .build()
@@ -44,8 +46,10 @@ object AppUpdateChecker {
         val installedTag = context.getSharedPreferences(PREFS, 0)
             .getString("installed_release_tag", "")
             .orEmpty()
+        val dismissed = context.getSharedPreferences(PREFS, 0)
+            .getString("dismissed_release_tag", "")
+            .orEmpty()
 
-        // Prefer newest release that has an APK (nightly or stable)
         for (i in 0 until arr.length()) {
             val rel = arr.getJSONObject(i)
             val tag = rel.optString("tag_name")
@@ -53,27 +57,20 @@ object AppUpdateChecker {
             val assets = rel.optJSONArray("assets") ?: continue
             for (j in 0 until assets.length()) {
                 val a = assets.getJSONObject(j)
-                val n = a.optString("name")
-                if (n.endsWith(".apk", true)) {
+                if (a.optString("name").endsWith(".apk", true)) {
                     apkUrl = a.optString("browser_download_url")
                     break
                 }
             }
             if (apkUrl.isNullOrBlank()) continue
-            if (tag == installedTag) return@withContext null // already on this build
-            // Skip if same as what we already marked dismissed
-            val dismissed = context.getSharedPreferences(PREFS, 0)
-                .getString("dismissed_release_tag", "")
-            if (tag == dismissed) continue
+            if (tag == installedTag || tag == dismissed) continue
 
             val isNightly = tag.startsWith("nightly", true)
             val newerStable = !isNightly && isNewer(tag, BuildConfig.VERSION_NAME)
             val newerNightly = isNightly && tag != installedTag
-            if (!newerStable && !newerNightly && installedTag.isNotBlank()) continue
-            if (!newerStable && !newerNightly && installedTag.isBlank()) {
-                // first run: only prompt if remote tag clearly different channel
-                if (!isNightly && !isNewer(tag, BuildConfig.VERSION_NAME)) continue
-            }
+            // Always surface newest nightly if we have never recorded an install tag
+            val firstRunNightly = isNightly && installedTag.isBlank()
+            if (!newerStable && !newerNightly && !firstRunNightly) continue
 
             return@withContext AppUpdateInfo(
                 tag = tag,
@@ -91,7 +88,7 @@ object AppUpdateChecker {
         fun parts(s: String): List<Int> {
             val core = s.removePrefix("v")
                 .substringBefore("-")
-                .replace("nightly", "")
+                .replace("nightly", "", ignoreCase = true)
                 .split(".")
             return core.mapNotNull { it.toIntOrNull() }
         }
@@ -120,10 +117,18 @@ object AppUpdateChecker {
             .apply()
     }
 
-    /** Download APK and open system installer — no browser. */
+    fun openReleasePage(context: Context, info: AppUpdateInfo) {
+        val uri = Uri.parse(info.htmlUrl.ifBlank { info.apkUrl ?: return })
+        context.startActivity(
+            Intent(Intent.ACTION_VIEW, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        )
+    }
+
+    /** Download APK and open system installer. */
     suspend fun downloadAndInstall(context: Context, info: AppUpdateInfo): Result<Unit> =
         withContext(Dispatchers.IO) {
-            val url = info.apkUrl ?: return@withContext Result.failure(IllegalStateException("No APK asset"))
+            val url = info.apkUrl
+                ?: return@withContext Result.failure(IllegalStateException("No APK asset"))
             runCatching {
                 val file = ApkInstaller.downloadApk(context, url, "OmniHub-update.apk")
                 markInstalled(context, info.tag)
