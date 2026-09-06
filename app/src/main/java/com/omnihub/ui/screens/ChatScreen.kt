@@ -41,9 +41,16 @@ import java.util.Calendar
 
 data class ChatBubble(val role: String, val content: String)
 
-private fun timeGreeting(name: String, soulHint: String?): String {
+private val GREETINGS = listOf(
+    "Ready when you are.",
+    "What are we building?",
+    "Let's continue.",
+    "Pick up where you left off.",
+    "Your move."
+)
+
+private fun timeGreeting(name: String): String {
     val hour = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
-    val who = name.ifBlank { "" }
     val base = when {
         hour < 5 -> "Still up"
         hour < 12 -> "Good morning"
@@ -51,8 +58,9 @@ private fun timeGreeting(name: String, soulHint: String?): String {
         hour < 21 -> "Good evening"
         else -> "Late night"
     }
-    val head = if (who.isBlank()) "$base." else "$base, $who."
-    return if (!soulHint.isNullOrBlank()) "$head\n$soulHint" else head
+    val head = if (name.isBlank()) "$base." else "$base, $name."
+    val tip = GREETINGS[hour % GREETINGS.size]
+    return "$head\n$tip"
 }
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
@@ -78,7 +86,7 @@ fun ChatScreen(
     var sending by remember { mutableStateOf(false) }
     var conversations by remember { mutableStateOf(listOf<ConversationEntity>()) }
     var incognito by remember { mutableStateOf(UserPrefs.isIncognito(context)) }
-    var greeting by remember { mutableStateOf("\u2026") }
+    var greeting by remember { mutableStateOf(timeGreeting(UserPrefs.getName(context))) }
     var showAddSheet by remember { mutableStateOf(false) }
     var showProviderSheet by remember { mutableStateOf(false) }
     var pendingAttachments by remember { mutableStateOf(listOf<String>()) }
@@ -99,16 +107,7 @@ fun ChatScreen(
     }
 
     fun refreshGreeting() {
-        val name = UserPrefs.getName(context)
-        // Non-suspend: use in-memory units only (generatePromptContext is suspend)
-        val soul = runCatching {
-            app.soul.loadUnits()
-                .sortedByDescending { it.importance * it.createdAt }
-                .firstOrNull()
-                ?.summary
-                ?.take(80)
-        }.getOrNull()
-        greeting = timeGreeting(name, soul)
+        greeting = timeGreeting(UserPrefs.getName(context))
     }
 
     fun startNewChat() {
@@ -166,10 +165,9 @@ fun ChatScreen(
                     .map { ChatMessage(it.role, it.content) }
                 val preferredId = if (preferred == "auto") null else preferred
                 val target = preferredId?.let { app.sourceManager.get(it) }
-                    ?: app.sourceManager.configured().firstOrNull()
                     ?: app.sourceManager.all().firstOrNull()
                 if (target == null) {
-                    messages = messages.dropLast(1) + ChatBubble("assistant", "No providers ready. Open Providers and sign in, or install from Store.")
+                    messages = messages.dropLast(1) + ChatBubble("assistant", "No providers. Open Providers.")
                 } else {
                     val buf = StringBuilder()
                     ProviderBridge.streamChat(
@@ -275,7 +273,7 @@ fun ChatScreen(
                                 val mine = msg.role == "user"
                                 Row(Modifier.fillMaxWidth(), horizontalArrangement = if (mine) Arrangement.End else Arrangement.Start) {
                                     Surface(shape = RoundedCornerShape(16.dp), color = if (mine) OmniAmber.copy(alpha = 0.25f) else MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.widthIn(max = 320.dp)) {
-                                        Text(msg.content.ifBlank { "\u2026" }, Modifier.padding(12.dp))
+                                        Text(msg.content.ifBlank { "…" }, Modifier.padding(12.dp))
                                     }
                                 }
                             }
@@ -301,16 +299,10 @@ fun ChatScreen(
         ModalBottomSheet(onDismissRequest = { showProviderSheet = false }) {
             Column(Modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text("Provider", fontWeight = FontWeight.Bold)
-                Text("Auto picks by task. Or lock to one provider.", style = MaterialTheme.typography.bodySmall)
                 Spacer(Modifier.height(8.dp))
                 (listOf("auto" to "Auto") + sources.map { it.info.id to it.info.name }).forEach { (id, label) ->
                     NavigationDrawerItem(
-                        label = {
-                            Row {
-                                Text(label)
-                                if (id != "auto" && !ProviderAuthStore.isSignedIn(context, id)) Text(" \u00b7 sign in", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
-                        },
+                        label = { Text(label) },
                         selected = preferred == id,
                         onClick = {
                             preferred = id
