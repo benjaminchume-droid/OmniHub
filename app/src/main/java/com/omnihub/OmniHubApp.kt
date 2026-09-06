@@ -13,6 +13,8 @@ import com.omnihub.soul.SoulManager
 import com.omnihub.source.AutoIssueReporter
 import com.omnihub.source.SourceManager
 import com.omnihub.source.SourceRouter
+import com.omnihub.terminal.OmniTerminal
+import com.omnihub.workspace.OmniWorkspace
 
 class OmniHubApp : Application() {
     lateinit var registry: ProviderRegistry
@@ -37,6 +39,10 @@ class OmniHubApp : Application() {
         private set
     lateinit var analyticsRepo: AnalyticsRepository
         private set
+    lateinit var workspace: OmniWorkspace
+        private set
+    lateinit var terminal: OmniTerminal
+        private set
 
     override fun onCreate() {
         super.onCreate()
@@ -50,6 +56,8 @@ class OmniHubApp : Application() {
         issueReporter = AutoIssueReporter(this)
         analytics = AnalyticsCollector(this)
         analyticsRepo = AnalyticsRepository(analytics, chatRepo, soul)
+        workspace = OmniWorkspace(this)
+        terminal = OmniTerminal(this, workspace)
         ProviderBootstrap.reload(this, registry)
         router = OmniRouter(registry)
         sourceRouter = SourceRouter(sourceManager, soul, issueReporter)
