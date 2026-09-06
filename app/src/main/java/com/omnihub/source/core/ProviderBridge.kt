@@ -30,7 +30,8 @@ object ProviderBridge {
         .followRedirects(true)
         .build()
 
-    /** Always runs network on Dispatchers.IO — never Main. */
+    private val deviceId: String by lazy { UUID.randomUUID().toString() }
+
     fun streamChat(
         context: Context,
         providerId: String,
@@ -50,14 +51,14 @@ object ProviderBridge {
                 when {
                     kind.equals("MCP", true) ->
                         runMcpAction(context, providerId, providerName, siteUrl, last)
-                    providerId.contains("chatgpt", true) || siteUrl.contains("chatgpt.com") ->
+                    isChatGpt(providerId, siteUrl) ->
                         chatGpt(context, providerId, messages)
                     else ->
                         genericWebChat(context, providerId, providerName, siteUrl, hostOf(siteUrl), messages)
                 }
             }
         } catch (e: Exception) {
-            "Could not reach $providerName: ${e.javaClass.simpleName} ${e.message ?: ""}".trim()
+            "Could not reach $providerName: ${e.javaClass.simpleName}: ${e.message ?: "unknown"}"
         }
 
         emit(StreamToken(reply, done = true))
@@ -82,43 +83,102 @@ object ProviderBridge {
         )
     }
 
+    private fun isChatGpt(providerId: String, siteUrl: String): Boolean =
+        providerId.contains("chatgpt", true) ||
+            providerId.equals("openai", true) ||
+            siteUrl.contains("chatgpt.com") ||
+            siteUrl.contains("chat.openai.com")
+
     private fun hostOf(url: String): String =
         try { java.net.URI(url).host ?: url } catch (_: Exception) { url }
 
-    private fun cookieHeader(context: Context, providerId: String, host: String): String {
-        val stored = listOf(
-            SecureStore.getSession(context, providerId),
-            SecureStore.getSession(context, "web_$providerId"),
-            SecureStore.getSession(context, host.replace('.', '_'))
-        ).firstOrNull { !it.isNullOrBlank() }.orEmpty()
-        val live = try {
-            CookieManager.getInstance().getCookie("https://$host").orEmpty()
-        } catch (_: Exception) { "" }
+    private fun cookieHeader(context: Context, providerId: String, vararg hosts: String): String {
+        val storedKeys = listOf(
+            providerId,
+            "web_$providerId",
+            *hosts.map { it.replace('.', '_') }.toTypedArray()
+        )
+        val stored = storedKeys
+            .mapNotNull { SecureStore.getSession(context, it) }
+            .firstOrNull { it.isNotBlank() }
+            .orEmpty()
+
+        val liveParts = linkedSetOf<String>()
+        val cm = try { CookieManager.getInstance() } catch (_: Exception) { null }
+        if (cm != null) {
+            for (h in hosts) {
+                val urls = listOf("https://$h", "https://www.$h", "http://$h")
+                for (u in urls) {
+                    try {
+                        val c = cm.getCookie(u).orEmpty()
+                        if (c.isNotBlank()) {
+                            c.split(";").map { it.trim() }.filter { it.contains("=") }.forEach { liveParts.add(it) }
+                        }
+                    } catch (_: Exception) {}
+                }
+            }
+        }
+        val live = liveParts.joinToString("; ")
         return when {
-            stored.isNotBlank() && live.isNotBlank() -> "$stored; $live"
+            stored.isNotBlank() && live.isNotBlank() -> mergeCookies(stored, live)
             stored.isNotBlank() -> stored
             else -> live
         }
     }
 
+    private fun mergeCookies(a: String, b: String): String {
+        val map = linkedMapOf<String, String>()
+        fun putAll(s: String) {
+            s.split(";").map { it.trim() }.filter { it.contains("=") }.forEach {
+                val i = it.indexOf('=')
+                map[it.substring(0, i)] = it.substring(i + 1)
+            }
+        }
+        putAll(a); putAll(b)
+        return map.entries.joinToString("; ") { "${it.key}=${it.value}" }
+    }
+
     private fun chatGpt(context: Context, providerId: String, messages: List<ChatMessage>): String {
-        val cookies = cookieHeader(context, providerId, "chatgpt.com")
+        val cookies = cookieHeader(
+            context, providerId,
+            "chatgpt.com", "chat.openai.com", "openai.com", "auth.openai.com"
+        )
         if (cookies.isBlank()) {
-            return "Sign in to ChatGPT under Providers, then send again."
+            return "Not signed in. Open Providers → ChatGPT → Sign in, wait until the chat page loads, then press Back."
         }
 
+        // 1) session → accessToken
         val sessionReq = Request.Builder()
             .url("https://chatgpt.com/api/auth/session")
             .header("Cookie", cookies)
             .header("User-Agent", UA)
             .header("Accept", "application/json")
+            .header("Referer", "https://chatgpt.com/")
             .get()
             .build()
-        val sessionBody = http.newCall(sessionReq).execute().use { it.body?.string().orEmpty() }
-        val access = runCatching { JSONObject(sessionBody).optString("accessToken") }.getOrNull().orEmpty()
+
+        val sessionBody = try {
+            http.newCall(sessionReq).execute().use { resp ->
+                val body = resp.body?.string().orEmpty()
+                if (!resp.isSuccessful) {
+                    return "ChatGPT session check failed (HTTP ${resp.code}). Sign in again under Providers."
+                }
+                body
+            }
+        } catch (e: Exception) {
+            return "Network error reaching ChatGPT session: ${e.message}"
+        }
+
+        val access = runCatching {
+            val o = JSONObject(sessionBody)
+            o.optString("accessToken").ifBlank {
+                o.optJSONObject("user")?.optString("accessToken").orEmpty()
+            }
+        }.getOrNull().orEmpty()
 
         if (access.isBlank()) {
-            return "ChatGPT session expired. Open Providers → Sign in again."
+            val preview = sessionBody.take(120).replace('\n', ' ')
+            return "ChatGPT did not return an access token. Sign in again and stay on the chat page before going back. ($preview)"
         }
 
         val userText = messages.lastOrNull { it.role == "user" }?.content.orEmpty()
@@ -126,14 +186,22 @@ object ProviderBridge {
             .put("action", "next")
             .put("parent_message_id", UUID.randomUUID().toString())
             .put("model", "auto")
+            .put("timezone_offset_min", -java.util.TimeZone.getDefault().rawOffset / 60000)
             .put(
                 "messages", JSONArray().put(
                     JSONObject()
                         .put("id", UUID.randomUUID().toString())
                         .put("author", JSONObject().put("role", "user"))
-                        .put("content", JSONObject().put("content_type", "text").put("parts", JSONArray().put(userText)))
+                        .put(
+                            "content",
+                            JSONObject()
+                                .put("content_type", "text")
+                                .put("parts", JSONArray().put(userText))
+                        )
+                        .put("metadata", JSONObject())
                 )
             )
+            .put("history_and_training_disabled", false)
 
         val convReq = Request.Builder()
             .url("https://chatgpt.com/backend-api/conversation")
@@ -144,19 +212,33 @@ object ProviderBridge {
             .header("Accept", "text/event-stream")
             .header("Referer", "https://chatgpt.com/")
             .header("Origin", "https://chatgpt.com")
+            .header("oai-device-id", deviceId)
+            .header("oai-language", "en-US")
             .post(payload.toString().toRequestBody("application/json".toMediaType()))
             .build()
 
-        val raw = http.newCall(convReq).execute().use { resp ->
-            if (!resp.isSuccessful) {
-                return "ChatGPT returned ${resp.code}. Sign in again if this continues."
+        val raw = try {
+            http.newCall(convReq).execute().use { resp ->
+                val body = resp.body?.string().orEmpty()
+                if (!resp.isSuccessful) {
+                    val hint = when (resp.code) {
+                        401, 403 -> "Session expired or blocked. Sign in again."
+                        429 -> "Rate limited. Wait a minute."
+                        404, 422 -> "ChatGPT API shape changed; reply path needs update."
+                        else -> "HTTP ${resp.code}"
+                    }
+                    return "ChatGPT error: $hint ${body.take(160)}"
+                }
+                body
             }
-            resp.body?.string().orEmpty()
+        } catch (e: Exception) {
+            return "Network error on ChatGPT conversation: ${e.message}"
         }
 
-        return parseSseOrJsonReply(raw).ifBlank {
-            "ChatGPT returned no text. Try again or sign in again."
-        }
+        val parsed = parseSseOrJsonReply(raw)
+        if (parsed.isNotBlank()) return parsed
+
+        return "ChatGPT returned no text. Try a shorter message or sign in again."
     }
 
     private fun parseSseOrJsonReply(raw: String): String {
@@ -168,14 +250,26 @@ object ProviderBridge {
             if (json == "[DONE]" || json.isBlank()) return@forEach
             runCatching {
                 val o = JSONObject(json)
-                val msg = o.optJSONObject("message") ?: return@runCatching
-                val content = msg.optJSONObject("content") ?: return@runCatching
-                val arr = content.optJSONArray("parts") ?: return@runCatching
-                val text = (0 until arr.length()).joinToString("") { arr.optString(it) }
-                if (text.isNotBlank()) parts.add(text)
+                // modern formats
+                val msg = o.optJSONObject("message")
+                if (msg != null) {
+                    val content = msg.optJSONObject("content")
+                    val arr = content?.optJSONArray("parts")
+                    if (arr != null) {
+                        val text = (0 until arr.length()).joinToString("") { arr.optString(it) }
+                        if (text.isNotBlank()) parts.add(text)
+                    }
+                }
+                // delta / v2 style
+                val delta = o.optJSONObject("delta")
+                val dContent = delta?.optString("content").orEmpty()
+                if (dContent.isNotBlank()) parts.add(dContent)
+                val v = o.optString("v")
+                if (v.isNotBlank() && !v.startsWith("{") && parts.isEmpty()) parts.add(v)
             }
         }
         if (parts.isNotEmpty()) return parts.last()
+
         runCatching {
             val o = JSONObject(raw)
             val msg = o.optJSONObject("message")
@@ -194,9 +288,9 @@ object ProviderBridge {
         host: String,
         messages: List<ChatMessage>
     ): String {
-        val cookies = cookieHeader(context, providerId, host)
+        val cookies = cookieHeader(context, providerId, host, host.removePrefix("www."))
         if (cookies.isBlank()) {
-            return "Sign in to $providerName under Providers, then send again."
+            return "Not signed in to $providerName. Open Providers → Sign in, finish login, then Back."
         }
 
         val req = Request.Builder()
@@ -213,11 +307,12 @@ object ProviderBridge {
             return "Network error talking to $providerName: ${e.message}"
         }
 
-        if (code in 200..399) {
-            return "$providerName session is active, but full chat protocol for this provider is not wired yet. " +
-                "Use ChatGPT for real replies, or wait for a source update."
+        return if (code in 200..399) {
+            "$providerName session looks valid, but its chat protocol is not fully wired yet. " +
+                "Install and use ChatGPT for real replies right now."
+        } else {
+            "$providerName returned HTTP $code. Sign in again."
         }
-        return "$providerName returned HTTP $code. Sign in again."
     }
 
     private fun runMcpAction(
@@ -227,11 +322,12 @@ object ProviderBridge {
         siteUrl: String,
         task: String
     ): String {
-        val cookies = cookieHeader(context, providerId, hostOf(siteUrl))
+        val host = hostOf(siteUrl)
+        val cookies = cookieHeader(context, providerId, host)
         if (cookies.isBlank()) {
             return "Sign in to $providerName first."
         }
-        return "MCP session ready on $providerName. Task: ${task.take(200)}"
+        return "MCP session ready on $providerName. Task queued: ${task.take(200)}"
     }
 
     private const val UA =
@@ -242,7 +338,12 @@ object ProviderAuthStore {
     private const val PREFS = "omni_provider_auth"
 
     fun isSignedIn(context: Context, providerId: String): Boolean {
-        if (context.getSharedPreferences(PREFS, 0).getBoolean("signed_$providerId", false)) return true
+        if (context.getSharedPreferences(PREFS, 0).getBoolean("signed_$providerId", false)) {
+            // still require real cookies for chat
+            val s = SecureStore.getSession(context, providerId)
+                ?: SecureStore.getSession(context, "web_$providerId")
+            if (!s.isNullOrBlank()) return true
+        }
         val s = SecureStore.getSession(context, providerId)
             ?: SecureStore.getSession(context, "web_$providerId")
         return !s.isNullOrBlank()
@@ -250,6 +351,10 @@ object ProviderAuthStore {
 
     fun setSignedIn(context: Context, providerId: String, signed: Boolean) {
         context.getSharedPreferences(PREFS, 0).edit().putBoolean("signed_$providerId", signed).apply()
+        if (!signed) {
+            SecureStore.clearSession(context, providerId)
+            SecureStore.clearSession(context, "web_$providerId")
+        }
     }
 
     fun preferredProvider(context: Context): String =
