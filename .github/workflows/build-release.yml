@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Release version (e.g. 1.0.3)'
+        description: 'Release version (e.g. 1.0.4)'
         required: false
-        default: '1.0.3'
+        default: '1.0.4'
 
 permissions:
   contents: write
@@ -49,7 +49,6 @@ jobs:
             > gradle/wrapper/gradle-wrapper.properties
           test $(wc -c < gradlew) -gt 5000
           test $(wc -c < gradle/wrapper/gradle-wrapper.jar) -gt 20000
-          ls -la gradlew gradle/wrapper/
 
       - name: Decode Keystore
         env:
@@ -58,60 +57,44 @@ jobs:
         run: |
           if [ -n "$KEYSTORE_BASE64" ]; then
             echo "$KEYSTORE_BASE64" | base64 --decode > keystore.jks
-            {
-              echo "storeFile=keystore.jks"
-              echo "storePassword=${{ secrets.KEYSTORE_PASSWORD }}"
-              echo "keyAlias=${{ secrets.KEY_ALIAS }}"
-              echo "keyPassword=${{ secrets.KEY_PASSWORD }}"
-            } > keystore.properties
-            ls -la keystore.jks
           elif [ -n "$KEYSTORE" ]; then
             echo "$KEYSTORE" | base64 --decode > keystore.jks
-            {
-              echo "storeFile=keystore.jks"
-              echo "storePassword=${{ secrets.KEYSTORE_PASSWORD }}"
-              echo "keyAlias=${{ secrets.KEY_ALIAS }}"
-              echo "keyPassword=${{ secrets.KEY_PASSWORD }}"
-            } > keystore.properties
           else
             echo "WARNING: No keystore — unsigned release APK"
+            exit 0
           fi
+          {
+            echo "storeFile=keystore.jks"
+            echo "storePassword=${{ secrets.KEYSTORE_PASSWORD }}"
+            echo "keyAlias=${{ secrets.KEY_ALIAS }}"
+            echo "keyPassword=${{ secrets.KEY_PASSWORD }}"
+          } > keystore.properties
+          ls -la keystore.jks
 
       - name: Build Release APK
         id: build
         run: |
           set -o pipefail
-          ./gradlew --version
           set +e
-          ./gradlew clean assembleRelease --stacktrace --warning-mode all 2>&1 | tee build.log
+          ./gradlew clean assembleRelease --stacktrace 2>&1 | tee build.log
           STATUS=${PIPESTATUS[0]}
           set -e
-          echo "---- Gradle exit: $STATUS ----"
-          echo "---- Last 80 log lines ----"
-          tail -80 build.log || true
-          echo "---- Kotlin errors ----"
-          grep -E "^e: |Unresolved reference|is not abstract|Conflicting|error:|FAILURE:" build.log | tail -150 || true
-          echo "---- APK search ----"
-          find app/build -type f -name "*.apk" -exec ls -lah {} \; 2>/dev/null || true
+          tail -60 build.log || true
+          grep -E "^e: |FAILURE:" build.log | tail -80 || true
           APK=$(find app/build/outputs/apk -type f -name "*.apk" 2>/dev/null | head -n 1 || true)
           if [ -z "$APK" ] || [ ! -f "$APK" ]; then
             echo "FATAL: No APK produced (gradle status=$STATUS)"
             exit 1
           fi
           SIZE=$(wc -c < "$APK")
-          echo "APK=$APK size=$SIZE"
           if [ "$SIZE" -lt 500000 ]; then
             echo "FATAL: APK too small ($SIZE bytes)"
             exit 1
           fi
-          cp "$APK" "./OmniHub-v1.0.3.apk"
-          echo "apk_path=OmniHub-v1.0.3.apk" >> "$GITHUB_OUTPUT"
-          ls -lah ./OmniHub-v1.0.3.apk
+          cp "$APK" "./OmniHub-v1.0.4.apk"
+          echo "apk_path=OmniHub-v1.0.4.apk" >> "$GITHUB_OUTPUT"
+          ls -lah ./OmniHub-v1.0.4.apk
           exit $STATUS
-        env:
-          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
 
       - name: Upload build log
         if: always()
@@ -125,23 +108,26 @@ jobs:
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: OmniHub-1.0.3-apk
-          path: OmniHub-v1.0.3.apk
+          name: OmniHub-1.0.4-apk
+          path: OmniHub-v1.0.4.apk
           if-no-files-found: error
 
       - name: Create GitHub Release
         if: success()
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.0.3-${{ github.run_number }}
-          name: OmniHub v1.0.3 (build ${{ github.run_number }})
+          tag_name: v1.0.4-${{ github.run_number }}
+          name: OmniHub v1.0.4 (build ${{ github.run_number }})
           body: |
-            ## OmniHub v1.0.3
-            - OmniSource Store (Web / MCP)
-            - Incognito, file/image attach
-            - Omni folder + terminal foundation
-            - API key UI removed
-          files: OmniHub-v1.0.3.apk
+            ## OmniHub v1.0.4
+            - **Real chat path** — no fake "Relayed / streaming" demo text
+            - Clean greeting only (Good morning, Name)
+            - Sign-in marks ready only with a live session
+            - Soul ignores system/error junk
+            - ChatGPT: send message → provider → show reply
+
+            **Install this APK over the old one.** Settings should show 1.0.4.
+          files: OmniHub-v1.0.4.apk
           draft: false
           prerelease: false
           generate_release_notes: true
