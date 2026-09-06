@@ -6,6 +6,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -37,9 +38,13 @@ import com.omnihub.history.ConversationEntity
 import com.omnihub.providers.ChatMessage
 import com.omnihub.source.core.ProviderAuthStore
 import com.omnihub.source.core.ProviderBridge
+import com.omnihub.update.AppUpdateChecker
+import com.omnihub.update.AppUpdateInfo
 import com.omnihub.ui.theme.OmniAmber
 import com.omnihub.ui.theme.OmniGlassBorder
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.Calendar
 
 data class ChatBubble(val role: String, val content: String)
@@ -62,8 +67,7 @@ private fun timeGreeting(name: String): String {
         else -> "Late night"
     }
     val head = if (name.isBlank()) "$base." else "$base, $name."
-    val tip = GREETINGS[hour % GREETINGS.size]
-    return "$head\n$tip"
+    return "$head\n${GREETINGS[hour % GREETINGS.size]}"
 }
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
@@ -88,12 +92,18 @@ fun ChatScreen(
     var input by remember { mutableStateOf("") }
     var sending by remember { mutableStateOf(false) }
     var conversations by remember { mutableStateOf(listOf<ConversationEntity>()) }
+    var projects by remember { mutableStateOf(listOf<com.omnihub.history.ProjectEntity>()) }
     var incognito by remember { mutableStateOf(UserPrefs.isIncognito(context)) }
     var greeting by remember { mutableStateOf(timeGreeting(UserPrefs.getName(context))) }
     var showAddSheet by remember { mutableStateOf(false) }
     var showProviderSheet by remember { mutableStateOf(false) }
     var pendingAttachments by remember { mutableStateOf(listOf<String>()) }
     var preferred by remember { mutableStateOf(ProviderAuthStore.preferredProvider(context)) }
+    var menuConv by remember { mutableStateOf<ConversationEntity?>(null) }
+    var renameText by remember { mutableStateOf("") }
+    var showRename by remember { mutableStateOf(false) }
+    var showProjectPicker by remember { mutableStateOf(false) }
+    var updateInfo by remember { mutableStateOf<AppUpdateInfo?>(null) }
     val listState = rememberLazyListState()
     val sources by app.sourceManager.sources.collectAsState()
 
@@ -109,15 +119,22 @@ fun ChatScreen(
         convPrefs.edit().putString("active_conv_id", id).apply()
     }
 
-    fun refreshGreeting() {
-        greeting = timeGreeting(UserPrefs.getName(context))
+    fun loadMessages(id: String?) {
+        if (id == null || incognito) {
+            if (!sending) messages = emptyList()
+            return
+        }
+        scope.launch {
+            val list = withContext(Dispatchers.IO) { app.chatRepo.getMessages(id) }
+            if (!sending) messages = list.map { ChatBubble(it.role, it.content) }
+        }
     }
 
     fun startNewChat() {
         messages = emptyList()
         persistActive(null)
         pendingAttachments = emptyList()
-        refreshGreeting()
+        greeting = timeGreeting(UserPrefs.getName(context))
     }
 
     fun toggleIncognito() {
@@ -131,12 +148,12 @@ fun ChatScreen(
         return sources.find { it.info.id == preferred }?.info?.name ?: preferred
     }
 
-    // Reload installed sources when returning to chat
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
         val obs = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 app.sourceManager.reload()
+                loadMessages(currentConvId)
             }
         }
         lifecycleOwner.lifecycle.addObserver(obs)
@@ -144,23 +161,18 @@ fun ChatScreen(
     }
 
     LaunchedEffect(Unit) {
-        refreshGreeting()
+        greeting = timeGreeting(UserPrefs.getName(context))
         app.sourceManager.reload()
-        app.chatRepo.observeConversations().collect { conversations = it }
+        loadMessages(currentConvId)
+        launch { app.chatRepo.observeConversations().collect { conversations = it } }
+        launch { app.chatRepo.observeProjects().collect { projects = it } }
+        launch {
+            updateInfo = runCatching { AppUpdateChecker.checkOmniHub() }.getOrNull()
+        }
     }
 
-    // Keep messages bound to Room so they survive navigation
-    LaunchedEffect(currentConvId, incognito) {
-        val id = currentConvId
-        if (id != null && !incognito) {
-            app.chatRepo.observeMessages(id).collect { list ->
-                if (!sending) {
-                    messages = list.map { ChatBubble(it.role, it.content) }
-                }
-            }
-        } else if (id == null && !sending) {
-            messages = emptyList()
-        }
+    LaunchedEffect(currentConvId) {
+        if (!sending) loadMessages(currentConvId)
     }
 
     fun send() {
@@ -171,28 +183,41 @@ fun ChatScreen(
         input = ""
         pendingAttachments = emptyList()
         keyboard?.hide()
-        messages = messages + ChatBubble("user", userText)
         sending = true
-        messages = messages + ChatBubble("assistant", "")
+
         scope.launch {
             try {
+                // SAVE FIRST so history never loses the user message
                 var convId = currentConvId
                 if (!incognito) {
                     if (convId == null) {
-                        convId = app.chatRepo.createConversation(userText.take(40).ifBlank { "Chat" })
+                        convId = withContext(Dispatchers.IO) {
+                            app.chatRepo.createConversation(userText.take(40).ifBlank { "Chat" })
+                        }
                         persistActive(convId)
                     }
-                    app.chatRepo.addMessage(convId!!, "user", userText)
+                    withContext(Dispatchers.IO) {
+                        app.chatRepo.addMessage(convId!!, "user", userText)
+                    }
+                    // reload from DB so UI matches storage
+                    val saved = withContext(Dispatchers.IO) { app.chatRepo.getMessages(convId!!) }
+                    messages = saved.map { ChatBubble(it.role, it.content) } + ChatBubble("assistant", "")
+                } else {
+                    messages = messages + ChatBubble("user", userText) + ChatBubble("assistant", "")
                 }
+
                 val hist = messages.filter { it.content.isNotBlank() || it.role == "user" }
                     .map { ChatMessage(it.role, it.content) }
                 val preferredId = if (preferred == "auto") null else preferred
                 val target = preferredId?.let { app.sourceManager.get(it) }
                     ?: app.sourceManager.all().firstOrNull()
+
                 if (target == null) {
-                    val err = "No source installed. Open Store, install a provider, then Providers → Sign in."
+                    val err = "No source installed. Open Store → install → Providers → Sign in."
                     messages = messages.dropLast(1) + ChatBubble("assistant", err)
-                    if (!incognito && convId != null) app.chatRepo.addMessage(convId, "assistant", err)
+                    if (!incognito && convId != null) {
+                        withContext(Dispatchers.IO) { app.chatRepo.addMessage(convId, "assistant", err) }
+                    }
                 } else {
                     val buf = StringBuilder()
                     ProviderBridge.streamChat(
@@ -209,7 +234,13 @@ fun ChatScreen(
                         }
                     }
                     val final = buf.toString().ifBlank { "No reply." }
-                    if (!incognito && convId != null) app.chatRepo.addMessage(convId, "assistant", final)
+                    if (!incognito && convId != null) {
+                        withContext(Dispatchers.IO) { app.chatRepo.addMessage(convId, "assistant", final) }
+                        val saved = withContext(Dispatchers.IO) { app.chatRepo.getMessages(convId) }
+                        messages = saved.map { ChatBubble(it.role, it.content) }
+                    } else {
+                        messages = messages.dropLast(1) + ChatBubble("assistant", final)
+                    }
                     runCatching { app.soul.learnFromExchange(target.info.id, hist, final, convId) }
                 }
             } catch (e: Exception) {
@@ -217,7 +248,9 @@ fun ChatScreen(
                 messages = messages.dropLast(1) + ChatBubble("assistant", err)
                 val cid = currentConvId
                 if (!incognito && cid != null) {
-                    runCatching { app.chatRepo.addMessage(cid, "assistant", err) }
+                    runCatching {
+                        withContext(Dispatchers.IO) { app.chatRepo.addMessage(cid, "assistant", err) }
+                    }
                 }
             } finally {
                 sending = false
@@ -238,16 +271,49 @@ fun ChatScreen(
                 Text("Chats", Modifier.padding(horizontal = 16.dp, vertical = 4.dp), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 LazyColumn(Modifier.weight(1f)) {
                     items(conversations, key = { it.id }) { conv ->
-                        NavigationDrawerItem(label = { Text(conv.title, maxLines = 1, overflow = TextOverflow.Ellipsis) }, selected = conv.id == currentConvId, onClick = {
-                            if (!incognito) { persistActive(conv.id); scope.launch { drawerState.close() } }
-                        })
+                        NavigationDrawerItem(
+                            label = {
+                                Text(
+                                    conv.title,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.combinedClickable(
+                                        onClick = {
+                                            if (!incognito) {
+                                                persistActive(conv.id)
+                                                loadMessages(conv.id)
+                                                scope.launch { drawerState.close() }
+                                            }
+                                        },
+                                        onLongClick = {
+                                            menuConv = conv
+                                            renameText = conv.title
+                                        }
+                                    )
+                                )
+                            },
+                            selected = conv.id == currentConvId,
+                            onClick = {
+                                if (!incognito) {
+                                    persistActive(conv.id)
+                                    loadMessages(conv.id)
+                                    scope.launch { drawerState.close() }
+                                }
+                            }
+                        )
                     }
                 }
                 HorizontalDivider(color = OmniGlassBorder)
                 val name = UserPrefs.getName(context).ifBlank { "You" }
                 NavigationDrawerItem(
-                    icon = { Box(Modifier.size(28.dp).clip(CircleShape).background(OmniAmber), contentAlignment = Alignment.Center) { Text(UserPrefs.getInitials(context), color = Color.Black, fontSize = 12.sp, fontWeight = FontWeight.Bold) } },
-                    label = { Text(name) }, selected = false, onClick = onOpenSettings
+                    icon = {
+                        Box(Modifier.size(28.dp).clip(CircleShape).background(OmniAmber), contentAlignment = Alignment.Center) {
+                            Text(UserPrefs.getInitials(context), color = Color.Black, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
+                    },
+                    label = { Text(name) },
+                    selected = false,
+                    onClick = onOpenSettings
                 )
                 Spacer(Modifier.height(12.dp))
             }
@@ -260,8 +326,12 @@ fun ChatScreen(
                 TopAppBar(
                     title = {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            IconButton(onClick = { scope.launch { if (drawerState.isClosed) drawerState.open() else drawerState.close() } }) { Icon(Icons.Default.Menu, "Menu", tint = OmniAmber) }
-                            IconButton(onClick = { toggleIncognito() }) { Icon(Icons.Outlined.VisibilityOff, "Incognito", tint = if (incognito) OmniAmber else MaterialTheme.colorScheme.onSurfaceVariant) }
+                            IconButton(onClick = { scope.launch { if (drawerState.isClosed) drawerState.open() else drawerState.close() } }) {
+                                Icon(Icons.Default.Menu, "Menu", tint = OmniAmber)
+                            }
+                            IconButton(onClick = { toggleIncognito() }) {
+                                Icon(Icons.Outlined.VisibilityOff, "Incognito", tint = if (incognito) OmniAmber else MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
                             if (incognito) Text("Incognito", style = MaterialTheme.typography.labelMedium, color = OmniAmber)
                         }
                     },
@@ -273,37 +343,84 @@ fun ChatScreen(
             },
             bottomBar = {
                 Column(Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.ime).padding(8.dp)) {
-                    if (pendingAttachments.isNotEmpty()) Text("${pendingAttachments.size} attached", style = MaterialTheme.typography.labelMedium, color = OmniAmber, modifier = Modifier.padding(horizontal = 8.dp))
+                    if (pendingAttachments.isNotEmpty()) {
+                        Text("${pendingAttachments.size} attached", style = MaterialTheme.typography.labelMedium, color = OmniAmber, modifier = Modifier.padding(horizontal = 8.dp))
+                    }
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         IconButton(onClick = { showAddSheet = true }) { Icon(Icons.Default.Add, "Add", tint = OmniAmber) }
-                        OutlinedTextField(value = input, onValueChange = { input = it }, modifier = Modifier.weight(1f), placeholder = { Text(if (incognito) "Incognito message" else "Message") }, shape = RoundedCornerShape(24.dp), maxLines = 4)
-                        IconButton(onClick = { send() }, enabled = !sending) { Icon(if (sending) Icons.Default.HourglassEmpty else Icons.Default.Send, "Send", tint = OmniAmber) }
+                        OutlinedTextField(
+                            value = input,
+                            onValueChange = { input = it },
+                            modifier = Modifier.weight(1f),
+                            placeholder = { Text(if (incognito) "Incognito message" else "Message") },
+                            shape = RoundedCornerShape(24.dp),
+                            maxLines = 4
+                        )
+                        IconButton(onClick = { send() }, enabled = !sending) {
+                            Icon(if (sending) Icons.Default.HourglassEmpty else Icons.Default.Send, "Send", tint = OmniAmber)
+                        }
                     }
                 }
             }
         ) { padding ->
-            Box(Modifier.fillMaxSize().padding(padding)) {
-                if (messages.isEmpty()) {
-                    Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text(greeting, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Medium, textAlign = TextAlign.Center)
-                        Spacer(Modifier.height(16.dp))
-                        Surface(shape = RoundedCornerShape(20.dp), color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f), modifier = Modifier.clickable { showProviderSheet = true }) {
-                            Text(providerLabel(), Modifier.padding(horizontal = 16.dp, vertical = 8.dp), color = OmniAmber, fontWeight = FontWeight.SemiBold)
+            Column(Modifier.fillMaxSize().padding(padding)) {
+                updateInfo?.let { info ->
+                    Surface(color = OmniAmber.copy(alpha = 0.2f), modifier = Modifier.fillMaxWidth().clickable {
+                        AppUpdateChecker.openReleasePage(context, info)
+                    }) {
+                        Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f)) {
+                                Text("Update available: ${info.tag}", fontWeight = FontWeight.SemiBold, color = OmniAmber)
+                                Text(info.name, style = MaterialTheme.typography.labelSmall, maxLines = 1)
+                            }
+                            Text("What's new", color = OmniAmber, fontWeight = FontWeight.Bold)
                         }
                     }
-                } else {
-                    Column(Modifier.fillMaxSize()) {
-                        Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp), horizontalArrangement = Arrangement.Center) {
-                            Surface(shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f), modifier = Modifier.clickable { showProviderSheet = true }) {
-                                Text(providerLabel(), Modifier.padding(horizontal = 12.dp, vertical = 4.dp), style = MaterialTheme.typography.labelMedium, color = OmniAmber)
+                }
+                Box(Modifier.fillMaxSize()) {
+                    if (messages.isEmpty()) {
+                        Column(
+                            Modifier.fillMaxSize().padding(24.dp),
+                            verticalArrangement = Arrangement.Center,
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text(greeting, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Medium, textAlign = TextAlign.Center)
+                            Spacer(Modifier.height(16.dp))
+                            Surface(
+                                shape = RoundedCornerShape(20.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                                modifier = Modifier.clickable { showProviderSheet = true }
+                            ) {
+                                Text(providerLabel(), Modifier.padding(horizontal = 16.dp, vertical = 8.dp), color = OmniAmber, fontWeight = FontWeight.SemiBold)
                             }
                         }
-                        LazyColumn(state = listState, modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp), contentPadding = PaddingValues(vertical = 12.dp)) {
-                            items(messages) { msg ->
-                                val mine = msg.role == "user"
-                                Row(Modifier.fillMaxWidth(), horizontalArrangement = if (mine) Arrangement.End else Arrangement.Start) {
-                                    Surface(shape = RoundedCornerShape(16.dp), color = if (mine) OmniAmber.copy(alpha = 0.25f) else MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.widthIn(max = 320.dp)) {
-                                        Text(msg.content.ifBlank { "…" }, Modifier.padding(12.dp))
+                    } else {
+                        Column(Modifier.fillMaxSize()) {
+                            Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp), horizontalArrangement = Arrangement.Center) {
+                                Surface(
+                                    shape = RoundedCornerShape(16.dp),
+                                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                    modifier = Modifier.clickable { showProviderSheet = true }
+                                ) {
+                                    Text(providerLabel(), Modifier.padding(horizontal = 12.dp, vertical = 4.dp), style = MaterialTheme.typography.labelMedium, color = OmniAmber)
+                                }
+                            }
+                            LazyColumn(
+                                state = listState,
+                                modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp),
+                                contentPadding = PaddingValues(vertical = 12.dp)
+                            ) {
+                                items(messages) { msg ->
+                                    val mine = msg.role == "user"
+                                    Row(Modifier.fillMaxWidth(), horizontalArrangement = if (mine) Arrangement.End else Arrangement.Start) {
+                                        Surface(
+                                            shape = RoundedCornerShape(16.dp),
+                                            color = if (mine) OmniAmber.copy(alpha = 0.25f) else MaterialTheme.colorScheme.surfaceVariant,
+                                            modifier = Modifier.widthIn(max = 320.dp)
+                                        ) {
+                                            Text(msg.content.ifBlank { "\u2026" }, Modifier.padding(12.dp))
+                                        }
                                     }
                                 }
                             }
@@ -312,6 +429,82 @@ fun ChatScreen(
                 }
             }
         }
+    }
+
+    // Long-press conversation menu
+    menuConv?.let { conv ->
+        AlertDialog(
+            onDismissRequest = { menuConv = null },
+            title = { Text(conv.title, maxLines = 2, overflow = TextOverflow.Ellipsis) },
+            text = {
+                Column {
+                    TextButton(onClick = { showRename = true; menuConv = conv }) { Text("Rename") }
+                    TextButton(onClick = {
+                        scope.launch {
+                            app.chatRepo.setPinned(conv.id, !conv.isPinned)
+                            menuConv = null
+                        }
+                    }) { Text(if (conv.isPinned) "Unpin" else "Pin") }
+                    TextButton(onClick = { showProjectPicker = true }) { Text("Add to project") }
+                    TextButton(onClick = {
+                        scope.launch {
+                            app.chatRepo.deleteConversation(conv.id)
+                            if (currentConvId == conv.id) startNewChat()
+                            menuConv = null
+                        }
+                    }, colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)) {
+                        Text("Delete")
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { menuConv = null }) { Text("Close") }
+            }
+        )
+    }
+
+    if (showRename && menuConv != null) {
+        AlertDialog(
+            onDismissRequest = { showRename = false },
+            title = { Text("Rename") },
+            text = {
+                OutlinedTextField(value = renameText, onValueChange = { renameText = it }, singleLine = true)
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val id = menuConv!!.id
+                    scope.launch {
+                        app.chatRepo.renameConversation(id, renameText)
+                        showRename = false
+                        menuConv = null
+                    }
+                }) { Text("Save") }
+            },
+            dismissButton = { TextButton(onClick = { showRename = false }) { Text("Cancel") } }
+        )
+    }
+
+    if (showProjectPicker && menuConv != null) {
+        AlertDialog(
+            onDismissRequest = { showProjectPicker = false },
+            title = { Text("Add to project") },
+            text = {
+                Column {
+                    if (projects.isEmpty()) Text("No projects yet. Create one in Projects.")
+                    projects.forEach { p ->
+                        TextButton(onClick = {
+                            val cid = menuConv!!.id
+                            scope.launch {
+                                app.chatRepo.setProject(cid, p.id)
+                                showProjectPicker = false
+                                menuConv = null
+                            }
+                        }) { Text(p.name) }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { showProjectPicker = false }) { Text("Close") } }
+        )
     }
 
     if (showAddSheet) {
@@ -329,9 +522,7 @@ fun ChatScreen(
         ModalBottomSheet(onDismissRequest = { showProviderSheet = false }) {
             Column(Modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text("Provider", fontWeight = FontWeight.Bold)
-                if (sources.isEmpty()) {
-                    Text("Install a source from Store first.", style = MaterialTheme.typography.bodySmall)
-                }
+                if (sources.isEmpty()) Text("Install a source from Store first.", style = MaterialTheme.typography.bodySmall)
                 Spacer(Modifier.height(8.dp))
                 (listOf("auto" to "Auto") + sources.map { it.info.id to it.info.name }).forEach { (id, label) ->
                     NavigationDrawerItem(
