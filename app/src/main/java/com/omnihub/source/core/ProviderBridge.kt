@@ -30,7 +30,14 @@ object ProviderBridge {
         .followRedirects(true)
         .build()
 
-    private val deviceId: String by lazy { UUID.randomUUID().toString() }
+    private fun deviceId(context: Context): String {
+        val prefs = context.getSharedPreferences("omni_device", 0)
+        val existing = prefs.getString("oai_device_id", null)
+        if (!existing.isNullOrBlank()) return existing
+        val id = UUID.randomUUID().toString()
+        prefs.edit().putString("oai_device_id", id).apply()
+        return id
+    }
 
     fun streamChat(
         context: Context,
@@ -93,12 +100,14 @@ object ProviderBridge {
         try { java.net.URI(url).host ?: url } catch (_: Exception) { url }
 
     private fun cookieHeader(context: Context, providerId: String, vararg hosts: String): String {
-        val storedKeys = listOf(
+        val active = AccountStore.activeAccountId(context, providerId)
+        val sessionKeys = listOf(
+            AccountStore.sessionKey(providerId, active),
             providerId,
             "web_$providerId",
             *hosts.map { it.replace('.', '_') }.toTypedArray()
         )
-        val stored = storedKeys
+        val stored = sessionKeys
             .mapNotNull { SecureStore.getSession(context, it) }
             .firstOrNull { it.isNotBlank() }
             .orEmpty()
@@ -107,8 +116,7 @@ object ProviderBridge {
         val cm = try { CookieManager.getInstance() } catch (_: Exception) { null }
         if (cm != null) {
             for (h in hosts) {
-                val urls = listOf("https://$h", "https://www.$h", "http://$h")
-                for (u in urls) {
+                for (u in listOf("https://$h", "https://www.$h")) {
                     try {
                         val c = cm.getCookie(u).orEmpty()
                         if (c.isNotBlank()) {
@@ -144,10 +152,9 @@ object ProviderBridge {
             "chatgpt.com", "chat.openai.com", "openai.com", "auth.openai.com"
         )
         if (cookies.isBlank()) {
-            return "Not signed in. Open Providers → ChatGPT → Sign in, wait until the chat page loads, then press Back."
+            return "Not signed in. Providers → ChatGPT → Sign in → wait for the chat page → Back."
         }
 
-        // 1) session → accessToken
         val sessionReq = Request.Builder()
             .url("https://chatgpt.com/api/auth/session")
             .header("Cookie", cookies)
@@ -161,12 +168,12 @@ object ProviderBridge {
             http.newCall(sessionReq).execute().use { resp ->
                 val body = resp.body?.string().orEmpty()
                 if (!resp.isSuccessful) {
-                    return "ChatGPT session check failed (HTTP ${resp.code}). Sign in again under Providers."
+                    return "ChatGPT session check failed (HTTP ${resp.code}). Sign in again."
                 }
                 body
             }
         } catch (e: Exception) {
-            return "Network error reaching ChatGPT session: ${e.message}"
+            return "Network error: ${e.message}"
         }
 
         val access = runCatching {
@@ -177,8 +184,7 @@ object ProviderBridge {
         }.getOrNull().orEmpty()
 
         if (access.isBlank()) {
-            val preview = sessionBody.take(120).replace('\n', ' ')
-            return "ChatGPT did not return an access token. Sign in again and stay on the chat page before going back. ($preview)"
+            return "No access token. Sign in again and stay on the ChatGPT chat page before going Back."
         }
 
         val userText = messages.lastOrNull { it.role == "user" }?.content.orEmpty()
@@ -212,7 +218,7 @@ object ProviderBridge {
             .header("Accept", "text/event-stream")
             .header("Referer", "https://chatgpt.com/")
             .header("Origin", "https://chatgpt.com")
-            .header("oai-device-id", deviceId)
+            .header("oai-device-id", deviceId(context))
             .header("oai-language", "en-US")
             .post(payload.toString().toRequestBody("application/json".toMediaType()))
             .build()
@@ -221,24 +227,30 @@ object ProviderBridge {
             http.newCall(convReq).execute().use { resp ->
                 val body = resp.body?.string().orEmpty()
                 if (!resp.isSuccessful) {
+                    if (body.contains("Unusual activity", ignoreCase = true) ||
+                        body.contains("unusual activity", ignoreCase = true)
+                    ) {
+                        return "ChatGPT blocked this request (unusual activity). " +
+                            "Wait 5–15 minutes, then Providers → Sign out → Sign in again in the browser, " +
+                            "stay on the chat page, Back, and retry. " +
+                            "Or long-press ChatGPT → Add account and sign in with another account."
+                    }
                     val hint = when (resp.code) {
                         401, 403 -> "Session expired or blocked. Sign in again."
                         429 -> "Rate limited. Wait a minute."
-                        404, 422 -> "ChatGPT API shape changed; reply path needs update."
                         else -> "HTTP ${resp.code}"
                     }
-                    return "ChatGPT error: $hint ${body.take(160)}"
+                    return "ChatGPT: $hint"
                 }
                 body
             }
         } catch (e: Exception) {
-            return "Network error on ChatGPT conversation: ${e.message}"
+            return "Network error: ${e.message}"
         }
 
         val parsed = parseSseOrJsonReply(raw)
         if (parsed.isNotBlank()) return parsed
-
-        return "ChatGPT returned no text. Try a shorter message or sign in again."
+        return "ChatGPT returned no text. Try again."
     }
 
     private fun parseSseOrJsonReply(raw: String): String {
@@ -250,7 +262,6 @@ object ProviderBridge {
             if (json == "[DONE]" || json.isBlank()) return@forEach
             runCatching {
                 val o = JSONObject(json)
-                // modern formats
                 val msg = o.optJSONObject("message")
                 if (msg != null) {
                     val content = msg.optJSONObject("content")
@@ -260,21 +271,15 @@ object ProviderBridge {
                         if (text.isNotBlank()) parts.add(text)
                     }
                 }
-                // delta / v2 style
                 val delta = o.optJSONObject("delta")
                 val dContent = delta?.optString("content").orEmpty()
                 if (dContent.isNotBlank()) parts.add(dContent)
-                val v = o.optString("v")
-                if (v.isNotBlank() && !v.startsWith("{") && parts.isEmpty()) parts.add(v)
             }
         }
         if (parts.isNotEmpty()) return parts.last()
-
         runCatching {
             val o = JSONObject(raw)
-            val msg = o.optJSONObject("message")
-            val content = msg?.optJSONObject("content")
-            val arr = content?.optJSONArray("parts")
+            val arr = o.optJSONObject("message")?.optJSONObject("content")?.optJSONArray("parts")
             if (arr != null && arr.length() > 0) return arr.optString(0)
         }
         return ""
@@ -290,9 +295,8 @@ object ProviderBridge {
     ): String {
         val cookies = cookieHeader(context, providerId, host, host.removePrefix("www."))
         if (cookies.isBlank()) {
-            return "Not signed in to $providerName. Open Providers → Sign in, finish login, then Back."
+            return "Not signed in to $providerName. Providers → Sign in → Back."
         }
-
         val req = Request.Builder()
             .url(siteUrl.ifBlank { "https://$host" })
             .header("User-Agent", UA)
@@ -300,18 +304,15 @@ object ProviderBridge {
             .header("Cookie", cookies)
             .get()
             .build()
-
         val code = try {
             http.newCall(req).execute().use { it.code }
         } catch (e: Exception) {
-            return "Network error talking to $providerName: ${e.message}"
+            return "Network error: ${e.message}"
         }
-
         return if (code in 200..399) {
-            "$providerName session looks valid, but its chat protocol is not fully wired yet. " +
-                "Install and use ChatGPT for real replies right now."
+            "$providerName session is valid, but its chat protocol is not fully wired yet."
         } else {
-            "$providerName returned HTTP $code. Sign in again."
+            "$providerName HTTP $code. Sign in again."
         }
     }
 
@@ -322,12 +323,9 @@ object ProviderBridge {
         siteUrl: String,
         task: String
     ): String {
-        val host = hostOf(siteUrl)
-        val cookies = cookieHeader(context, providerId, host)
-        if (cookies.isBlank()) {
-            return "Sign in to $providerName first."
-        }
-        return "MCP session ready on $providerName. Task queued: ${task.take(200)}"
+        val cookies = cookieHeader(context, providerId, hostOf(siteUrl))
+        if (cookies.isBlank()) return "Sign in to $providerName first."
+        return "MCP session ready on $providerName. Task: ${task.take(200)}"
     }
 
     private const val UA =
@@ -338,15 +336,14 @@ object ProviderAuthStore {
     private const val PREFS = "omni_provider_auth"
 
     fun isSignedIn(context: Context, providerId: String): Boolean {
-        if (context.getSharedPreferences(PREFS, 0).getBoolean("signed_$providerId", false)) {
-            // still require real cookies for chat
-            val s = SecureStore.getSession(context, providerId)
-                ?: SecureStore.getSession(context, "web_$providerId")
-            if (!s.isNullOrBlank()) return true
-        }
-        val s = SecureStore.getSession(context, providerId)
-            ?: SecureStore.getSession(context, "web_$providerId")
-        return !s.isNullOrBlank()
+        val active = AccountStore.activeAccountId(context, providerId)
+        val keys = listOf(
+            AccountStore.sessionKey(providerId, active),
+            providerId,
+            "web_$providerId"
+        )
+        if (keys.any { !SecureStore.getSession(context, it).isNullOrBlank() }) return true
+        return context.getSharedPreferences(PREFS, 0).getBoolean("signed_$providerId", false)
     }
 
     fun setSignedIn(context: Context, providerId: String, signed: Boolean) {
@@ -354,6 +351,10 @@ object ProviderAuthStore {
         if (!signed) {
             SecureStore.clearSession(context, providerId)
             SecureStore.clearSession(context, "web_$providerId")
+            val active = AccountStore.activeAccountId(context, providerId)
+            if (!active.isNullOrBlank()) {
+                SecureStore.clearSession(context, AccountStore.sessionKey(providerId, active))
+            }
         }
     }
 
