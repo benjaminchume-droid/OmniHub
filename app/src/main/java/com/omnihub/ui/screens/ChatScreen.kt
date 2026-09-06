@@ -46,13 +46,7 @@ import java.util.Calendar
 
 data class ChatBubble(val role: String, val content: String)
 
-private val GREETINGS = listOf(
-    "Ready when you are.",
-    "What are we building?",
-    "Let's continue.",
-    "Pick up where you left off.",
-    "Your move."
-)
+private val GREETINGS = listOf("Ready when you are.", "What are we building?", "Let's continue.", "Pick up where you left off.", "Your move.")
 
 private fun timeGreeting(name: String): String {
     val hour = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
@@ -84,7 +78,6 @@ fun ChatScreen(
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val keyboard = LocalSoftwareKeyboardController.current
     val convPrefs = remember { context.getSharedPreferences("omni_chat_session", 0) }
-
     var currentConvId by remember { mutableStateOf(convPrefs.getString("active_conv_id", null)) }
     var messages by remember { mutableStateOf(listOf<ChatBubble>()) }
     var input by remember { mutableStateOf("") }
@@ -120,10 +113,7 @@ fun ChatScreen(
 
     suspend fun loadMessagesFromDb(id: String?) {
         if (uiLocked || sending) return
-        if (id == null || incognito) {
-            messages = emptyList()
-            return
-        }
+        if (id == null || incognito) { messages = emptyList(); return }
         val list = withContext(Dispatchers.IO) { app.chatRepo.getMessages(id) }
         if (uiLocked || sending) return
         if (id != currentConvId) return
@@ -133,10 +123,7 @@ fun ChatScreen(
     fun openConversation(id: String) {
         if (incognito || sending || uiLocked) return
         persistActive(id)
-        scope.launch {
-            loadMessagesFromDb(id)
-            drawerState.close()
-        }
+        scope.launch { loadMessagesFromDb(id); drawerState.close() }
     }
 
     fun startNewChat() {
@@ -165,17 +152,13 @@ fun ChatScreen(
         loadMessagesFromDb(currentConvId)
         launch { app.chatRepo.observeConversations().collect { conversations = it } }
         launch { app.chatRepo.observeProjects().collect { projects = it } }
-        launch {
-            updateInfo = runCatching { AppUpdateChecker.checkOmniHub(context) }.getOrNull()
-        }
+        launch { updateInfo = runCatching { AppUpdateChecker.checkOmniHub(context) }.getOrNull() }
     }
 
     fun send() {
         val text = input.trim()
         if ((text.isBlank() && pendingAttachments.isEmpty()) || sending) return
-        val attachNote = if (pendingAttachments.isNotEmpty()) {
-            "\n\n[Attached: ${pendingAttachments.size} item(s)]"
-        } else ""
+        val attachNote = if (pendingAttachments.isNotEmpty()) "\n\n[Attached: ${pendingAttachments.size} item(s)]" else ""
         val userText = text + attachNote
         input = ""
         pendingAttachments = emptyList()
@@ -184,6 +167,7 @@ fun ChatScreen(
         uiLocked = true
         val baseline = messages
         messages = baseline + ChatBubble("user", userText) + ChatBubble("assistant", "")
+
         scope.launch {
             var convId = currentConvId
             try {
@@ -195,24 +179,27 @@ fun ChatScreen(
                         currentConvId = convId
                         convPrefs.edit().putString("active_conv_id", convId).apply()
                     }
-                    withContext(Dispatchers.IO) {
-                        app.chatRepo.addMessage(convId!!, "user", userText)
-                    }
+                    withContext(Dispatchers.IO) { app.chatRepo.addMessage(convId!!, "user", userText) }
                 }
+
                 val hist = (baseline + ChatBubble("user", userText)).map { ChatMessage(it.role, it.content) }
                 val preferredId = if (preferred == "auto") null else preferred
-                val target = preferredId?.let { app.sourceManager.get(it) } ?: app.sourceManager.all().firstOrNull()
-                val reply: String = if (target == null) {
+                val allSources = app.sourceManager.all()
+                val ordered = buildList {
+                    if (preferredId != null) allSources.find { it.info.id == preferredId }?.let { add(it) }
+                    allSources.filter { preferredId == null || it.info.id != preferredId }.forEach { add(it) }
+                }
+                val candidates = ordered.map { Triple(it.info.id, it.info.name, it.info.websiteUrl) }
+
+                val reply: String = if (candidates.isEmpty()) {
                     "No source installed. Open Store → install → Providers → Sign in."
                 } else {
                     val buf = StringBuilder()
-                    ProviderBridge.streamChat(
+                    ProviderBridge.streamChatWithFallback(
                         context = context,
-                        providerId = target.info.id,
-                        providerName = target.info.name,
-                        siteUrl = target.info.websiteUrl,
+                        candidates = candidates,
                         messages = hist,
-                        kind = if (target.info.kind.name.contains("MCP")) "MCP" else "WEB"
+                        kind = "WEB"
                     ).collect { tok ->
                         if (tok.text.isNotEmpty()) {
                             buf.append(tok.text)
@@ -221,19 +208,19 @@ fun ChatScreen(
                     }
                     buf.toString().ifBlank { "No reply." }
                 }
+
                 messages = baseline + ChatBubble("user", userText) + ChatBubble("assistant", reply)
                 if (!incognito && convId != null) {
                     withContext(Dispatchers.IO) { app.chatRepo.addMessage(convId, "assistant", reply) }
                 }
-                if (target != null) {
-                    runCatching { app.soul.learnFromExchange(target.info.id, hist, reply, convId) }
+                ordered.firstOrNull()?.info?.id?.let { id ->
+                    runCatching { app.soul.learnFromExchange(id, hist, reply, convId) }
                 }
             } catch (e: Exception) {
                 val err = e.message?.takeIf { it.isNotBlank() } ?: "Something went wrong."
                 messages = baseline + ChatBubble("user", userText) + ChatBubble("assistant", err)
-                val cid = convId
-                if (!incognito && cid != null) {
-                    runCatching { withContext(Dispatchers.IO) { app.chatRepo.addMessage(cid, "assistant", err) } }
+                if (!incognito && convId != null) {
+                    runCatching { withContext(Dispatchers.IO) { app.chatRepo.addMessage(convId, "assistant", err) } }
                 }
             } finally {
                 sending = false
