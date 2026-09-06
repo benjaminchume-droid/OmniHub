@@ -10,11 +10,12 @@ class SourceManager(private val context: Context) {
     private val _sources = MutableStateFlow<List<AiSource>>(emptyList())
     val sources: StateFlow<List<AiSource>> = _sources.asStateFlow()
     private val installedDescriptors = mutableListOf<AiSource>()
+    private val installedExtensions = mutableListOf<AiSource>()
 
     init { reload() }
 
     fun reload() {
-        _sources.value = buildBundled() + installedDescriptors.toList()
+        _sources.value = buildBundled() + installedDescriptors + installedExtensions
     }
 
     fun all(): List<AiSource> = _sources.value
@@ -29,21 +30,31 @@ class SourceManager(private val context: Context) {
         reload()
     }
 
+    fun registerExtension(source: AiSource) {
+        installedExtensions.removeAll { it.info.id == source.info.id }
+        installedExtensions.add(source)
+        reload()
+    }
+
     fun uninstall(id: String) {
         installedDescriptors.removeAll { it.info.id == id }
+        installedExtensions.removeAll { it.info.id == id }
         reload()
     }
 
     private fun buildBundled(): List<AiSource> = listOf(
-        web("chatgpt_web", "ChatGPT", "https://chatgpt.com", "ChatGPT web session"),
-        web("claude_web", "Claude", "https://claude.ai", "Claude web session"),
-        web("gemini_web", "Gemini", "https://gemini.google.com", "Gemini web session"),
-        web("perplexity_web", "Perplexity", "https://www.perplexity.ai", "Perplexity web session"),
-        web("deepseek_web", "DeepSeek", "https://chat.deepseek.com", "DeepSeek web session"),
-        web("grok_web", "Grok", "https://x.com/i/grok", "Grok web session"),
-        web("kimi_web", "Kimi", "https://kimi.moonshot.cn", "Kimi web session")
+        web("chatgpt", "ChatGPT", "https://chatgpt.com"),
+        web("claude", "Claude", "https://claude.ai"),
+        web("gemini", "Gemini", "https://gemini.google.com"),
+        web("perplexity", "Perplexity", "https://www.perplexity.ai"),
+        web("deepseek", "DeepSeek", "https://chat.deepseek.com"),
+        web("grok", "Grok", "https://x.com/i/grok"),
+        web("groq", "Groq", "https://chat.groq.com"),
+        web("hy3", "Hy3", "https://hy3.ai"),
+        web("kimi", "Kimi", "https://kimi.moonshot.cn"),
+        web("zai", "Z.AI", "https://chat.z.ai")
     )
 
-    private fun web(id: String, name: String, url: String, desc: String): AiSource =
-        WebProviderSource(context, id, name, url, desc)
+    private fun web(id: String, name: String, url: String): AiSource =
+        WebProviderSource(context, id, name, url, "Built-in Web Core")
 }
