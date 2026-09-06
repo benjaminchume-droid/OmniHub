@@ -9,15 +9,14 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import com.omnihub.data.SecureStore
+import com.omnihub.source.core.AccountStore
 import com.omnihub.source.core.ProviderAuthStore
 
-/**
- * Sign-in WebView. Harvests cookies from the provider host + related auth hosts.
- */
 class WebLoginActivity : ComponentActivity() {
     private lateinit var web: WebView
     private var providerId: String = "session"
     private var providerName: String = "Provider"
+    private var accountId: String? = null
     private var siteUrl: String = ""
     private var lastCookies: String = ""
 
@@ -29,6 +28,8 @@ class WebLoginActivity : ComponentActivity() {
             ?: "Provider"
         providerId = intent.getStringExtra("provider_id")
             ?: providerName.lowercase().replace(Regex("[^a-z0-9]+"), "_").trim('_')
+        accountId = intent.getStringExtra("account_id")
+            ?: AccountStore.activeAccountId(this, providerId)
 
         val cm = CookieManager.getInstance()
         cm.setAcceptCookie(true)
@@ -68,28 +69,22 @@ class WebLoginActivity : ComponentActivity() {
 
     private fun harvestAll(currentUrl: String) {
         val cm = CookieManager.getInstance()
-        val hosts = linkedSetOf<String>()
-        hosts.add(currentUrl)
-        hosts.add(siteUrl)
-        // related auth domains
+        val hosts = linkedSetOf(currentUrl, siteUrl)
         when {
             providerId.contains("chatgpt", true) || siteUrl.contains("chatgpt", true) -> {
                 hosts += listOf(
-                    "https://chatgpt.com",
-                    "https://chat.openai.com",
-                    "https://auth.openai.com",
-                    "https://openai.com",
-                    "https://www.openai.com"
+                    "https://chatgpt.com", "https://chat.openai.com",
+                    "https://auth.openai.com", "https://openai.com"
                 )
             }
-            providerId.contains("claude", true) -> hosts += listOf("https://claude.ai", "https://www.claude.ai")
+            providerId.contains("claude", true) -> hosts += listOf("https://claude.ai")
             providerId.contains("gemini", true) -> hosts += listOf("https://gemini.google.com", "https://accounts.google.com")
-            providerId.contains("grok", true) -> hosts += listOf("https://x.com", "https://twitter.com")
-            providerId.contains("groq", true) -> hosts += listOf("https://chat.groq.com", "https://groq.com")
-            providerId.contains("perplexity", true) -> hosts += listOf("https://www.perplexity.ai", "https://perplexity.ai")
+            providerId.contains("grok", true) -> hosts += listOf("https://x.com")
+            providerId.contains("groq", true) -> hosts += listOf("https://chat.groq.com")
+            providerId.contains("perplexity", true) -> hosts += listOf("https://www.perplexity.ai")
             providerId.contains("deepseek", true) -> hosts += listOf("https://chat.deepseek.com")
             providerId.contains("kimi", true) -> hosts += listOf("https://kimi.moonshot.cn")
-            providerId.contains("zai", true) || providerId.contains("z.ai", true) -> hosts += listOf("https://chat.z.ai")
+            providerId.contains("zai", true) -> hosts += listOf("https://chat.z.ai")
         }
 
         val parts = linkedSetOf<String>()
@@ -103,11 +98,13 @@ class WebLoginActivity : ComponentActivity() {
         }
         if (parts.isNotEmpty()) {
             lastCookies = parts.joinToString("; ")
+            val key = AccountStore.sessionKey(providerId, accountId)
+            SecureStore.setSession(this, key, lastCookies)
             SecureStore.setSession(this, providerId, lastCookies)
             SecureStore.setSession(this, "web_$providerId", lastCookies)
-            // also store under host key
-            val host = try { java.net.URI(siteUrl).host ?: providerId } catch (_: Exception) { providerId }
-            SecureStore.setSession(this, host.replace('.', '_'), lastCookies)
+            if (!accountId.isNullOrBlank()) {
+                AccountStore.setActiveAccount(this, providerId, accountId)
+            }
         }
     }
 
