@@ -1,6 +1,7 @@
 package com.omnihub.ui.screens
 
 import android.content.Intent
+import android.widget.Toast
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -8,18 +9,17 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.Extension
+import androidx.compose.material.icons.filled.Login
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.omnihub.OmniHubApp
-import com.omnihub.source.AiSource
-import com.omnihub.source.AuthType
-import com.omnihub.source.SourceKind
+import com.omnihub.source.core.ProviderAuthStore
 import com.omnihub.ui.WebLoginActivity
 import com.omnihub.ui.theme.OmniAmber
 
@@ -28,10 +28,8 @@ import com.omnihub.ui.theme.OmniAmber
 fun SourcesScreen(onBack: () -> Unit) {
     val context = LocalContext.current
     val app = context.applicationContext as OmniHubApp
-    var sources by remember { mutableStateOf(app.sourceManager.all()) }
-    var selected by remember { mutableStateOf<AiSource?>(null) }
-
-    fun refresh() { sources = app.sourceManager.all() }
+    val sources by app.sourceManager.sources.collectAsState()
+    var tick by remember { mutableStateOf(0) }
 
     Scaffold(
         topBar = {
@@ -49,66 +47,61 @@ fun SourcesScreen(onBack: () -> Unit) {
             Modifier.fillMaxSize().padding(padding).padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            items(sources, key = { it.info.id }) { src ->
-                val ready = src.isConfigured() || src.info.authType == AuthType.NONE
-                Card(
-                    onClick = { selected = src },
-                    shape = RoundedCornerShape(14.dp),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
+            item {
+                Text(
+                    "Built-in Web Cores. Sign in once, then messages relay and stream back.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            items(sources.filter { it.info.bundled }, key = { it.info.id + tick }) { src ->
+                val signed = ProviderAuthStore.isSignedIn(context, src.info.id)
+                Card(shape = RoundedCornerShape(14.dp), modifier = Modifier.fillMaxWidth()) {
                     Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Default.Extension, null, tint = OmniAmber)
-                        Spacer(Modifier.width(12.dp))
                         Column(Modifier.weight(1f)) {
                             Text(src.info.name, fontWeight = FontWeight.SemiBold)
                             Text(
-                                "${src.info.kind} · ${if (ready) "Ready" else "Sign in"}",
-                                style = MaterialTheme.typography.labelSmall
+                                if (signed) "Ready" else "Sign in required",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (signed) OmniAmber else MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
-                        if (ready) {
+                        if (signed) {
                             Icon(Icons.Default.CheckCircle, null, tint = OmniAmber)
+                            TextButton(onClick = {
+                                ProviderAuthStore.setSignedIn(context, src.info.id, false)
+                                tick++
+                            }) { Text("Sign out") }
                         } else {
-                            Text("Sign in", color = OmniAmber, style = MaterialTheme.typography.labelMedium)
+                            Button(
+                                onClick = {
+                                    val i = Intent(context, WebLoginActivity::class.java).apply {
+                                        putExtra("url", src.info.websiteUrl)
+                                        putExtra("provider_id", src.info.id)
+                                        putExtra("provider_name", src.info.name)
+                                    }
+                                    context.startActivity(i)
+                                    ProviderAuthStore.setSignedIn(context, src.info.id, true)
+                                    tick++
+                                    Toast.makeText(context, "Complete sign-in, then chat", Toast.LENGTH_LONG).show()
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = OmniAmber, contentColor = Color.Black)
+                            ) {
+                                Icon(Icons.Default.Login, null)
+                                Spacer(Modifier.width(6.dp))
+                                Text("Sign in")
+                            }
                         }
                     }
                 }
             }
-        }
-    }
-
-    selected?.let { src ->
-        AlertDialog(
-            onDismissRequest = { selected = null },
-            title = { Text(src.info.name) },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text(src.info.description.ifBlank { "Installed provider" })
-                    Text("Type: ${src.info.kind}")
-                    Text(if (src.isConfigured()) "Status: Ready" else "Status: Needs sign-in")
-                }
-            },
-            confirmButton = {
-                if (!src.isConfigured() && (src.info.kind == SourceKind.WEB_SESSION || src.info.authType == AuthType.WEB_SESSION)) {
-                    TextButton(onClick = {
-                        val url = src.info.websiteUrl.ifBlank { "https://chatgpt.com" }
-                        context.startActivity(Intent(context, WebLoginActivity::class.java).apply {
-                            putExtra(WebLoginActivity.EXTRA_URL, url)
-                            putExtra(WebLoginActivity.EXTRA_TITLE, src.info.name)
-                        })
-                        selected = null
-                    }) { Text("Sign in") }
-                } else {
-                    TextButton(onClick = { selected = null }) { Text("Close") }
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = {
-                    app.sourceManager.uninstall(src.info.id)
-                    refresh()
-                    selected = null
-                }) { Text("Uninstall") }
+            item {
+                Text(
+                    "More providers: Store → install APK from Releases.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
-        )
+        }
     }
 }

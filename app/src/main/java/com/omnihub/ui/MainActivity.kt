@@ -60,7 +60,9 @@ fun OmniHubNav() {
                 onOpenCustomize = { navController.navigate("customize") },
                 onOpenSkills = { navController.navigate("skills") },
                 onOpenProjects = { navController.navigate("projects") },
-                onOpenSources = { navController.navigate("sources") }
+                onOpenSources = { navController.navigate("sources") },
+                onOpenStore = { navController.navigate("store") },
+                onOpenConnectors = { navController.navigate("connectors") }
             )
         }
         composable("settings") {
