@@ -8,6 +8,7 @@ import com.omnihub.providers.ChatResponse
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -25,9 +26,11 @@ object ProviderBridge {
     private val http = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(120, TimeUnit.SECONDS)
+        .writeTimeout(60, TimeUnit.SECONDS)
         .followRedirects(true)
         .build()
 
+    /** Always runs network on Dispatchers.IO — never Main. */
     fun streamChat(
         context: Context,
         providerId: String,
@@ -43,20 +46,22 @@ object ProviderBridge {
         }
 
         val reply = try {
-            when {
-                kind.equals("MCP", true) ->
-                    runMcpAction(context, providerId, providerName, siteUrl, last)
-                providerId.contains("chatgpt", true) || siteUrl.contains("chatgpt.com") ->
-                    chatGpt(context, providerId, messages)
-                else ->
-                    genericWebChat(context, providerId, providerName, siteUrl, hostOf(siteUrl), messages)
+            withContext(Dispatchers.IO) {
+                when {
+                    kind.equals("MCP", true) ->
+                        runMcpAction(context, providerId, providerName, siteUrl, last)
+                    providerId.contains("chatgpt", true) || siteUrl.contains("chatgpt.com") ->
+                        chatGpt(context, providerId, messages)
+                    else ->
+                        genericWebChat(context, providerId, providerName, siteUrl, hostOf(siteUrl), messages)
+                }
             }
         } catch (e: Exception) {
             "Could not reach $providerName: ${e.javaClass.simpleName} ${e.message ?: ""}".trim()
         }
 
         emit(StreamToken(reply, done = true))
-    }
+    }.flowOn(Dispatchers.IO)
 
     suspend fun chatOnce(
         context: Context,
@@ -210,7 +215,7 @@ object ProviderBridge {
 
         if (code in 200..399) {
             return "$providerName session is active, but full chat protocol for this provider is not wired yet. " +
-                "ChatGPT is fully wired — use ChatGPT for real replies, or wait for the next source update."
+                "Use ChatGPT for real replies, or wait for a source update."
         }
         return "$providerName returned HTTP $code. Sign in again."
     }
