@@ -12,8 +12,7 @@ import android.webkit.WebViewClient
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * One long-lived WebView per provider (multi-turn thread continuity).
- * [Session.busy] is informational; exclusive access is [ProviderRelayQueue].
+ * One long-lived WebView per provider. Exclusive access via [ProviderRelayQueue].
  */
 object WarmSessionPool {
 
@@ -23,7 +22,8 @@ object WarmSessionPool {
         var lastUrl: String = "",
         @Volatile var busy: Boolean = false,
         var lastUsedAt: Long = System.currentTimeMillis(),
-        var lastTransactionId: String = ""
+        var lastTransactionId: String = "",
+        var observerInstalled: Boolean = false
     )
 
     private val main = Handler(Looper.getMainLooper())
@@ -69,6 +69,7 @@ object WarmSessionPool {
             override fun onPageFinished(view: WebView?, url: String?) {
                 session.lastUrl = url.orEmpty()
                 session.ready = true
+                session.observerInstalled = false
             }
         }
         sessions[providerId] = session
