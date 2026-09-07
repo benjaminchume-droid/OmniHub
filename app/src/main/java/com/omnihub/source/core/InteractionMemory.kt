@@ -33,15 +33,18 @@ object InteractionMemory {
         inputSelector: String?,
         sendSelector: String?
     ) {
-        context.getSharedPreferences(PREFS, 0).edit().apply {
+        val p = context.getSharedPreferences(PREFS, 0)
+        val inOk = p.getInt("in_ok_$providerId", 0)
+        val sendOk = p.getInt("send_ok_$providerId", 0)
+        p.edit().apply {
             if (!inputSelector.isNullOrBlank()) {
                 putString("in_$providerId", inputSelector)
-                putInt("in_ok_$providerId", getInt("in_ok_$providerId", 0) + 1)
+                putInt("in_ok_$providerId", inOk + 1)
                 putInt("in_fail_$providerId", 0)
             }
             if (!sendSelector.isNullOrBlank()) {
                 putString("send_$providerId", sendSelector)
-                putInt("send_ok_$providerId", getInt("send_ok_$providerId", 0) + 1)
+                putInt("send_ok_$providerId", sendOk + 1)
                 putInt("send_fail_$providerId", 0)
             }
             putLong("ts_$providerId", System.currentTimeMillis())
