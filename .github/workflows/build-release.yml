@@ -67,7 +67,7 @@ jobs:
         id: ver
         run: |
           VN=$(grep -E 'versionName\s*=' app/build.gradle.kts | head -1 | sed -E 's/.*versionName\s*=\s*"([^"]+)".*/\1/')
-          if [ -z "$VN" ]; then VN="1.0.8.2"; fi
+          if [ -z "$VN" ]; then VN="1.0.9.6"; fi
           echo "version=$VN" >> $GITHUB_OUTPUT
           echo "Resolved versionName=$VN"
 
@@ -78,7 +78,6 @@ jobs:
           if [ -z "$CHANNEL" ]; then CHANNEL=nightly; fi
           if [ "${{ github.event_name }}" = "push" ]; then CHANNEL=nightly; fi
           VN="${{ steps.ver.outputs.version }}"
-          DAY=$(date -u +%Y%m%d)
           echo "channel=$CHANNEL" >> $GITHUB_OUTPUT
           if [ "$CHANNEL" = "stable" ]; then
             echo "tag=v${VN}" >> $GITHUB_OUTPUT
@@ -123,13 +122,14 @@ jobs:
             App versionName: **${{ steps.ver.outputs.version }}**
             Channel: **${{ steps.meta.outputs.channel }}**
 
-            ### WebCore 1.0.8.2
-            - Spatial Send button sensing (nearest control to the right of the input)
-            - Multi-strategy submit: attr selectors, pointer events, form.requestSubmit, Enter
-            - Verifies message left the input box
-            - Human-like / ProseMirror-friendly fill
+            ### 1.0.9.6 WebRelay
+            - Hard INPUT read-back (ChatGPT/Perplexity ProseMirror path)
+            - SEND confirm via user bubble / generating (not guess-click)
+            - Baseline-bound MutationObserver streaming
+            - Update sensing: version + nightly# only (no 182/183 false prompts)
+            - Per-provider queue, no force-unlock
 
-            Install the APK attached to this release (not the old v1.0.7 asset).
+            Install the APK attached to this release.
           files: ${{ steps.meta.outputs.apk }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
