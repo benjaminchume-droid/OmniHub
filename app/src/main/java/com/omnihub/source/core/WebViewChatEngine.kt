@@ -11,8 +11,18 @@ import java.util.UUID
 import kotlin.coroutines.resume
 
 /**
- * Web Interaction Engine 1.0.9.4
- * Per-provider queue, MutationObserver stream, single-send, layout memory, latency logs.
+ * WebRelay Engine v4 (1.0.9.5)
+ *
+ * HOT PATH (warm session):
+ *   resolve composer → focus → inject → read-back verify → send once →
+ *   confirm user bubble / gen → MutationObserver stream → complete
+ *
+ * Rules:
+ * - One recovery max per step (not 20 retries)
+ * - Fail fast on INPUT_FAILED / SEND_FAILED (no multi-minute spin)
+ * - PageMap validated each txn; update on success
+ * - ProviderRelayQueue owns exclusivity (no force-unlock)
+ * - OmniHub overhead target: ms–~1s on warm path; model time is separate
  */
 object WebViewChatEngine {
 
@@ -28,14 +38,12 @@ object WebViewChatEngine {
     fun cleanReply(raw: String, userMessage: String): String? {
         var text = raw.trim()
         val um = userMessage.trim()
-        if (um.isNotEmpty() && text.startsWith(um)) {
-            text = text.removePrefix(um).trim()
-        }
+        if (um.isNotEmpty() && text.startsWith(um)) text = text.removePrefix(um).trim()
         val lines = text.lines().map { it.trim() }.filter { it.isNotEmpty() }
         val filtered = lines.filterNot { CHROME_LINE.matches(it) }
             .filterNot { it.equals(um, ignoreCase = true) }
         text = filtered.joinToString("\n").trim()
-        if (text.length < 1) return null
+        if (text.isEmpty()) return null
         val lower = text.lowercase()
         val chromeHits = listOf(
             "terms of service", "privacy policy", "sign in", "new chat",
@@ -50,12 +58,10 @@ object WebViewChatEngine {
         siteUrl: String,
         providerId: String,
         userMessage: String,
-        timeoutMs: Long = 180_000L,
+        timeoutMs: Long = 90_000L,
         onPartial: (String) -> Unit = {}
-    ): Result {
-        return ProviderRelayQueue.withProviderLock(providerId) { queueWaitMs ->
-            sendExclusive(context, siteUrl, providerId, userMessage, timeoutMs, queueWaitMs, onPartial)
-        }
+    ): Result = ProviderRelayQueue.withProviderLock(providerId) { queueWaitMs ->
+        sendExclusive(context, siteUrl, providerId, userMessage, timeoutMs, queueWaitMs, onPartial)
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -72,13 +78,12 @@ object WebViewChatEngine {
         val appCtx = context.applicationContext
         val txn = UUID.randomUUID().toString().take(8).uppercase()
         val t0 = System.currentTimeMillis()
-        val learnedIn = InteractionMemory.inputSelector(appCtx, providerId).orEmpty()
-        val learnedSend = InteractionMemory.sendSelector(appCtx, providerId).orEmpty()
+        val pageMap = ProviderPageMap.load(appCtx, providerId)
         val target = siteUrl.ifBlank {
             ProviderCatalog.urlFor(providerId) ?: "https://chatgpt.com/"
         }
 
-        Log.i(TAG, "[$txn] CREATED provider=$providerId queueWaitMs=$queueWaitMs")
+        Log.i(TAG, "[$txn] QUEUED→RUN provider=$providerId queueWaitMs=$queueWaitMs map=${pageMap.composer.isNotBlank()}")
 
         main.post {
             val session = WarmSessionPool.getOrCreate(appCtx, providerId)
@@ -89,6 +94,7 @@ object WebViewChatEngine {
             var finished = false
             var injected = false
             var firstTokenAt = 0L
+            var sendConfirmedAt = 0L
 
             lateinit var timeoutRunnable: Runnable
 
@@ -100,20 +106,19 @@ object WebViewChatEngine {
                 try {
                     web.evaluateJavascript(
                         "(function(){window.__omniRunning=false;" +
-                            "if(window.__omniObs){try{window.__omniObs.disconnect()}catch(e){} window.__omniObs=null;}" +
+                            "if(window.__omniObs){try{window.__omniObs.disconnect()}catch(e){}window.__omniObs=null;}" +
                             "if(window.__omniTimer){clearInterval(window.__omniTimer);window.__omniTimer=null;}})();",
                         null
                     )
                 } catch (_: Exception) {}
-                if (!ok) {
-                    InteractionMemory.markFailure(appCtx, providerId, "in")
-                    InteractionMemory.markFailure(appCtx, providerId, "send")
-                }
+                if (!ok) ProviderPageMap.rememberFailure(appCtx, providerId)
                 val total = System.currentTimeMillis() - t0
+                val oh = if (sendConfirmedAt > 0) sendConfirmedAt - t0 else total
                 Log.i(
                     TAG,
                     "[$txn] ${if (ok) "DELIVERED" else "FAILURE"} len=${text.length} " +
-                        "totalMs=$total queueMs=$queueWaitMs firstTokenMs=${if (firstTokenAt > 0) firstTokenAt - t0 else -1}"
+                        "totalMs=$total omniOverheadMs=$oh queueMs=$queueWaitMs " +
+                        "firstTokenMs=${if (firstTokenAt > 0) firstTokenAt - t0 else -1}"
                 )
                 if (cont.isActive) cont.resume(Result(text, ok, txn))
             }
@@ -124,17 +129,12 @@ object WebViewChatEngine {
                         "if(!n.length)return '';return (n[n.length-1].innerText||'').trim().slice(0,12000);})();"
                 ) { last ->
                     val t = last?.trim()?.removeSurrounding("\"")
-                        ?.replace("\\n", "\n")
-                        ?.replace("\\\"", "\"")
-                        ?.trim().orEmpty()
-                    if (t.length > 20) {
+                        ?.replace("\\n", "\n")?.replace("\\\"", "\"")?.trim().orEmpty()
+                    if (t.length > 24) {
                         val cleaned = cleanReply(t, userMessage) ?: t
                         complete(ReplySanitizer.strip(cleaned).ifBlank { cleaned }, true)
                     } else {
-                        complete(
-                            "Timed out waiting for the model (txn $txn). Stay on the signed-in chat page and retry.",
-                            false
-                        )
+                        complete("REPLY_TIMEOUT txn $txn — send/observe did not complete. Stay on signed-in chat and retry.", false)
                     }
                 }
             }
@@ -150,21 +150,19 @@ object WebViewChatEngine {
                         when {
                             t.startsWith("ERR:") ->
                                 complete(t.removePrefix("ERR:").ifBlank { "Page error" }, false)
-                            t.isBlank() ->
-                                complete("Empty reply from page.", false)
+                            t.isBlank() -> complete("Empty reply.", false)
                             else -> {
                                 val cleaned = cleanReply(t, userMessage) ?: t
-                                val stripped = ReplySanitizer.strip(cleaned)
-                                complete(stripped.ifBlank { cleaned }, true)
+                                complete(ReplySanitizer.strip(cleaned).ifBlank { cleaned }, true)
                             }
                         }
                     }
                 }
 
                 @JavascriptInterface
-                fun onLearn(inputSel: String?, sendSel: String?) {
+                fun onLearn(inputSel: String?, sendSel: String?, convSel: String?) {
                     main.post {
-                        InteractionMemory.remember(appCtx, providerId, inputSel, sendSel)
+                        ProviderPageMap.rememberSuccess(appCtx, providerId, inputSel, sendSel, convSel)
                     }
                 }
 
@@ -186,7 +184,11 @@ object WebViewChatEngine {
 
                 @JavascriptInterface
                 fun onState(state: String) {
-                    Log.i(TAG, "[$txn] $state +${System.currentTimeMillis() - t0}ms")
+                    val now = System.currentTimeMillis()
+                    if (state == "SEND_CONFIRMED" && sendConfirmedAt == 0L) {
+                        sendConfirmedAt = now
+                    }
+                    Log.i(TAG, "[$txn] $state +${now - t0}ms")
                 }
             }
             web.addJavascriptInterface(bridge, bridgeName)
@@ -198,6 +200,7 @@ object WebViewChatEngine {
                 }
             }
 
+            // Circuit breaker only — not normal control flow
             main.postDelayed(timeoutRunnable, timeoutMs)
 
             fun inject() {
@@ -206,46 +209,52 @@ object WebViewChatEngine {
                 Log.i(TAG, "[$txn] INJECT +${System.currentTimeMillis() - t0}ms")
                 web.evaluateJavascript(
                     "(function(){window.__omniRunning=false;" +
-                        "if(window.__omniObs){try{window.__omniObs.disconnect()}catch(e){} window.__omniObs=null;}" +
+                        "if(window.__omniObs){try{window.__omniObs.disconnect()}catch(e){}window.__omniObs=null;}" +
                         "if(window.__omniTimer){clearInterval(window.__omniTimer);window.__omniTimer=null;}})();",
                     null
                 )
-                main.postDelayed({
-                    if (finished) return@postDelayed
+                // Next frame — no multi-hundred-ms artificial delay
+                main.post {
+                    if (finished) return@post
                     web.evaluateJavascript(
-                        buildEngineScript(userMessage, learnedIn, learnedSend, txn),
+                        buildEngineScript(
+                            userMessage,
+                            pageMap.composer,
+                            pageMap.send,
+                            pageMap.conversation,
+                            txn
+                        ),
                         null
                     )
-                }, 16)
+                }
             }
 
             fun waitComposerThenInject(attempt: Int) {
                 if (finished || injected) return
-                val learnedCheck = if (learnedIn.isNotBlank())
-                    "try{var le=document.querySelector(${org.json.JSONObject.quote(learnedIn)});if(le)learned=true;}catch(e){}"
+                // Max ~1.5s discovery (15 * 100ms), not 9+ seconds
+                val cSel = pageMap.composer
+                val learnedBit = if (cSel.isNotBlank())
+                    "try{var le=document.querySelector(${org.json.JSONObject.quote(cSel)});if(le)learned=true;}catch(e){}"
                 else ""
-                val checkJs =
-                    "(function(){var learned=false;$learnedCheck" +
+                web.evaluateJavascript(
+                    "(function(){var learned=false;$learnedBit" +
                         "var n=document.querySelectorAll('textarea,[contenteditable=true],div[role=textbox],#prompt-textarea,.ProseMirror').length;" +
-                        "var body=(document.body&&document.body.innerText||'').slice(0,1200).toLowerCase();" +
+                        "var body=(document.body&&document.body.innerText||'').slice(0,1000).toLowerCase();" +
                         "var auth=/sign in to continue|log in to continue|create an account|enter your password/.test(body);" +
                         "var pw=!!document.querySelector('input[type=password]');" +
                         "return (learned?1:0)+':'+n+':'+(auth||pw?1:0);})();"
-                web.evaluateJavascript(checkJs) { countStr ->
+                ) { countStr ->
                     val cleaned = (countStr ?: "0:0:0").replace("\"", "").trim()
-                    val parts = cleaned.split(":")
-                    val learnedOk = parts.getOrNull(0)?.toIntOrNull() == 1
-                    val n = parts.getOrNull(1)?.toIntOrNull() ?: 0
-                    val auth = parts.getOrNull(2)?.toIntOrNull() == 1
+                    val p = cleaned.split(":")
+                    val learnedOk = p.getOrNull(0)?.toIntOrNull() == 1
+                    val n = p.getOrNull(1)?.toIntOrNull() ?: 0
+                    val auth = p.getOrNull(2)?.toIntOrNull() == 1
                     if (auth && n == 0 && !learnedOk) {
-                        complete(
-                            "Not signed in. Providers → open this source → Sign in → stay on the chat box → Back.",
-                            false
-                        )
+                        complete("AUTH_REQUIRED — sign in on the chat page, then retry.", false)
                         return@evaluateJavascript
                     }
                     if (learnedOk || n > 0) inject()
-                    else if (attempt >= 30) inject()
+                    else if (attempt >= 15) inject() // fail fast inside JS if still missing
                     else main.postDelayed({ waitComposerThenInject(attempt + 1) }, 100)
                 }
             }
@@ -259,16 +268,18 @@ object WebViewChatEngine {
             }
 
             if (session.ready && sameHost && session.lastUrl.isNotBlank()) {
-                Log.i(TAG, "[$txn] FAST_PATH url=${session.lastUrl}")
+                Log.i(TAG, "[$txn] HOT_PATH url=${session.lastUrl}")
                 waitComposerThenInject(0)
             } else {
                 session.ready = false
-                Log.i(TAG, "[$txn] LOAD $target")
+                session.observerInstalled = false
+                Log.i(TAG, "[$txn] COLD_LOAD $target")
                 web.webViewClient = object : android.webkit.WebViewClient() {
                     override fun onPageFinished(view: android.webkit.WebView?, url: String?) {
                         session.lastUrl = url.orEmpty()
                         session.ready = true
-                        main.postDelayed({ waitComposerThenInject(0) }, 200)
+                        // Minimal settle — SPA often ready; JS validates
+                        main.post { waitComposerThenInject(0) }
                     }
                 }
                 web.loadUrl(target)
@@ -278,13 +289,15 @@ object WebViewChatEngine {
 
     private fun buildEngineScript(
         message: String,
-        learnedIn: String,
-        learnedSend: String,
+        mapComposer: String,
+        mapSend: String,
+        mapConv: String,
         txn: String
     ): String {
         val jsonMsg = org.json.JSONObject.quote(message)
-        val jsonIn = org.json.JSONObject.quote(learnedIn)
-        val jsonSend = org.json.JSONObject.quote(learnedSend)
+        val jsonIn = org.json.JSONObject.quote(mapComposer)
+        val jsonSend = org.json.JSONObject.quote(mapSend)
+        val jsonConv = org.json.JSONObject.quote(mapConv)
         val jsonTxn = org.json.JSONObject.quote(txn)
         return """
 (function(){
@@ -292,68 +305,59 @@ object WebViewChatEngine {
   if (window.__omniTimer) { try { clearInterval(window.__omniTimer); } catch(e){} window.__omniTimer=null; }
   window.__omniRunning = true;
   var MSG = $jsonMsg;
-  var LEARNED_IN = $jsonIn;
-  var LEARNED_SEND = $jsonSend;
+  var MAP_IN = $jsonIn;
+  var MAP_SEND = $jsonSend;
+  var MAP_CONV = $jsonConv;
   var TXN = $jsonTxn;
 
   function state(s){ try{ OmniBridge.onState(s); }catch(e){} }
   function fail(t){
     window.__omniRunning=false;
-    if(window.__omniObs){try{window.__omniObs.disconnect()}catch(e){} window.__omniObs=null;}
+    if(window.__omniObs){try{window.__omniObs.disconnect()}catch(e){}window.__omniObs=null;}
     if(window.__omniTimer){clearInterval(window.__omniTimer);window.__omniTimer=null;}
     try{ OmniBridge.onReply('ERR:'+t); }catch(e){}
   }
   function ok(t){
     window.__omniRunning=false;
-    if(window.__omniObs){try{window.__omniObs.disconnect()}catch(e){} window.__omniObs=null;}
+    if(window.__omniObs){try{window.__omniObs.disconnect()}catch(e){}window.__omniObs=null;}
     if(window.__omniTimer){clearInterval(window.__omniTimer);window.__omniTimer=null;}
     try{ OmniBridge.onReply(t); }catch(e){}
   }
-  function learn(i,s){ try{ OmniBridge.onLearn(i||'', s||''); }catch(e){} }
+  function learn(i,s,c){ try{ OmniBridge.onLearn(i||'',s||'',c||''); }catch(e){} }
   function partial(t){ try{ OmniBridge.onPartial(t||''); }catch(e){} }
 
   function visible(el){
     if(!el) return false;
-    var r = el.getBoundingClientRect();
-    if(r.width < 4 || r.height < 4) return false;
-    var st = window.getComputedStyle(el);
-    if(st.display==='none' || st.visibility==='hidden' || parseFloat(st.opacity||'1')===0) return false;
-    return true;
+    var r=el.getBoundingClientRect();
+    if(r.width<4||r.height<4) return false;
+    var st=window.getComputedStyle(el);
+    return st.display!=='none' && st.visibility!=='hidden' && parseFloat(st.opacity||'1')!==0;
   }
 
   function needsAuth(){
-    var body=(document.body&&document.body.innerText||'').slice(0,2500).toLowerCase();
-    if(/sign in to continue|log in to continue|create an account|enter your password|verify your identity/.test(body)) return true;
+    var body=(document.body&&document.body.innerText||'').slice(0,2000).toLowerCase();
+    if(/sign in to continue|log in to continue|create an account|enter your password/.test(body)) return true;
     var pw=document.querySelector('input[type="password"]');
-    return !!(pw && visible(pw));
+    return !!(pw&&visible(pw));
   }
 
   function isGenerating(){
-    var sels = [
-      'button[aria-label*="Stop" i]','button[data-testid*="stop"]',
-      '[aria-label*="Stop generating" i]','[data-testid="stop-button"]',
-      '.result-streaming','.streaming'
-    ];
+    var sels=['button[aria-label*="Stop" i]','button[data-testid*="stop"]','[data-testid="stop-button"]','.result-streaming','.streaming'];
     for(var i=0;i<sels.length;i++){
-      try{
-        var nodes=document.querySelectorAll(sels[i]);
-        for(var j=0;j<nodes.length;j++){ if(visible(nodes[j])) return true; }
-      }catch(e){}
+      try{ var n=document.querySelectorAll(sels[i]); for(var j=0;j<n.length;j++) if(visible(n[j])) return true; }catch(e){}
     }
     return false;
   }
 
   function cssPath(el){
-    if(!el || el.nodeType!==1) return '';
+    if(!el||el.nodeType!==1) return '';
     if(el.id) return '#'+el.id;
-    var dt = el.getAttribute('data-testid');
-    if(dt) return '[data-testid="'+dt+'"]';
-    var al = el.getAttribute('aria-label');
+    var dt=el.getAttribute('data-testid'); if(dt) return '[data-testid="'+dt+'"]';
+    var al=el.getAttribute('aria-label');
     if(al) return el.tagName.toLowerCase()+'[aria-label="'+String(al).replace(/"/g,'')+'"]';
     var parts=[], cur=el;
-    for(var d=0; cur && cur.nodeType===1 && d<4; d++){
-      var name=cur.tagName.toLowerCase();
-      var parent=cur.parentElement;
+    for(var d=0;cur&&cur.nodeType===1&&d<4;d++){
+      var name=cur.tagName.toLowerCase(), parent=cur.parentElement;
       if(parent){
         var sibs=[].filter.call(parent.children,function(c){return c.tagName===cur.tagName;});
         if(sibs.length>1) name+=':nth-of-type('+([].indexOf.call(sibs,cur)+1)+')';
@@ -364,158 +368,112 @@ object WebViewChatEngine {
   }
 
   function scoreInput(el){
-    var s=0, r=el.getBoundingClientRect();
-    var tag=(el.tagName||'').toLowerCase();
+    var s=0,r=el.getBoundingClientRect();
     var ph=((el.getAttribute('placeholder')||'')+' '+(el.getAttribute('aria-label')||'')+' '+(el.getAttribute('data-testid')||'')+' '+(el.id||'')+' '+(el.className||'')).toLowerCase();
+    var tag=(el.tagName||'').toLowerCase();
     if(tag==='textarea') s+=35;
     if(el.isContentEditable||el.getAttribute('contenteditable')==='true') s+=32;
     if(el.getAttribute('role')==='textbox') s+=30;
-    if(el.id==='prompt-textarea') s+=50;
+    if(el.id==='prompt-textarea') s+=55;
     if(/prompt-textarea|composer|chat-input|prosemirror|ask|query/.test(ph)) s+=40;
-    if(r.width>120) s+=12;
-    if(r.top>(window.innerHeight||800)*0.25) s+=18;
-    if(/message|ask|prompt|chat|send a|type|write|question|search/.test(ph)) s+=18;
-    if(/search|email|password|username/.test(ph) && !/ask|chat|message/.test(ph)) s-=40;
+    if(r.width>100) s+=10;
+    if(r.top>(window.innerHeight||800)*0.2) s+=15;
+    if(/message|ask|prompt|chat|type|write|question/.test(ph)) s+=18;
+    if(/search|email|password|username/.test(ph)&&!/ask|chat|message/.test(ph)) s-=45;
     if(!visible(el)) s-=100;
     if(el.disabled) s-=50;
     return s;
   }
 
   function findInput(){
+    if(MAP_IN){
+      try{ var le=document.querySelector(MAP_IN); if(le&&visible(le)&&scoreInput(le)>=5) return le; }catch(e){}
+    }
     try{
-      var fixed=document.querySelector('#prompt-textarea,textarea[data-id],div.ProseMirror[contenteditable="true"],div[contenteditable="true"][data-lexical-editor]');
+      var fixed=document.querySelector('#prompt-textarea,div.ProseMirror[contenteditable="true"],div[contenteditable="true"][data-lexical-editor],textarea[data-id]');
       if(fixed&&visible(fixed)&&scoreInput(fixed)>=8) return fixed;
     }catch(e){}
-    if(LEARNED_IN){
-      try{ var le=document.querySelector(LEARNED_IN); if(le&&visible(le)&&scoreInput(le)>=5) return le; }catch(e){}
-    }
-    var nodes=[].slice.call(document.querySelectorAll(
-      'textarea,[contenteditable="true"],div[role="textbox"],#prompt-textarea,p[data-placeholder],input[type="text"],input:not([type]),[data-lexical-editor]'
-    ));
-    var best=null, bestScore=-999;
+    var nodes=[].slice.call(document.querySelectorAll('textarea,[contenteditable="true"],div[role="textbox"],#prompt-textarea,input[type="text"],input:not([type]),[data-lexical-editor]'));
+    var best=null,bestScore=-999;
     nodes.forEach(function(el){ var sc=scoreInput(el); if(sc>bestScore){bestScore=sc;best=el;} });
     return (best&&bestScore>=8)?best:null;
   }
 
-  function findSendSpatial(input){
+  function findSend(input){
+    if(MAP_SEND){
+      try{ var le=document.querySelector(MAP_SEND); if(le&&visible(le)) return le; }catch(e){}
+    }
+    var sels=['[data-testid="send-button"]','[data-testid*="send"]','button[aria-label*="Send" i]','button[aria-label*="Submit" i]','button[aria-label*="Ask" i]','button[type="submit"]'];
+    for(var i=0;i<sels.length;i++){
+      try{ var el=document.querySelector(sels[i]); if(el&&visible(el)) return el; }catch(e){}
+    }
+    // spatial once
     var ir=input.getBoundingClientRect(), cx=ir.right, cy=(ir.top+ir.bottom)/2;
-    var candidates=[].slice.call(document.querySelectorAll('button,[role="button"],input[type="submit"],[data-testid*="send"],[aria-label*="Send" i]'));
-    var best=null, bestScore=-1e9;
-    candidates.forEach(function(el){
+    var best=null,bestScore=-1e9;
+    [].slice.call(document.querySelectorAll('button,[role="button"]')).forEach(function(el){
       if(!visible(el)) return;
       var r=el.getBoundingClientRect();
       if(r.width<8||r.height<8||r.width>240||r.height>100) return;
-      var ex=(r.left+r.right)/2, ey=(r.top+r.bottom)/2;
-      var dx=ex-cx, dy=Math.abs(ey-cy);
-      var label=((el.getAttribute('aria-label')||'')+' '+(el.getAttribute('data-testid')||'')+' '+(el.className||'')+' '+(el.innerText||'')).toLowerCase();
+      var dx=(r.left+r.right)/2-cx, dy=Math.abs((r.top+r.bottom)/2-cy);
+      var label=((el.getAttribute('aria-label')||'')+(el.getAttribute('data-testid')||'')+(el.innerText||'')).toLowerCase();
       var score=0;
       if(dx>=-40&&dx<320) score+=80-dx*0.1; else score-=Math.abs(dx)*0.2;
       score-=dy*0.7;
-      if(/send|submit|arrow|paper|airplane|reply|ask/.test(label)) score+=70;
-      if(/stop|cancel|attach|upload|mic|voice|image|file|plus|menu/.test(label)) score-=90;
-      if(el.querySelector&&el.querySelector('svg')) score+=10;
+      if(/send|submit|arrow|paper|airplane|ask/.test(label)) score+=70;
+      if(/stop|cancel|attach|upload|mic|file|plus|menu/.test(label)) score-=90;
       if(score>bestScore){bestScore=score;best=el;}
     });
     return bestScore>12?best:null;
   }
 
-  function findSendByAttr(){
-    if(LEARNED_SEND){
-      try{ var le=document.querySelector(LEARNED_SEND); if(le&&visible(le)) return le; }catch(e){}
+  function convRoot(){
+    if(MAP_CONV){
+      try{ var el=document.querySelector(MAP_CONV); if(el) return el; }catch(e){}
     }
-    var sels=[
-      '[data-testid="send-button"]','[data-testid*="send"]',
-      'button[aria-label*="Send" i]','button[aria-label*="Submit" i]','button[aria-label*="Ask" i]',
-      'button[type="submit"]','form button[type="submit"]'
-    ];
+    var sels=['[data-message-author-role]','[data-testid*="conversation"]','main','[role="main"]','#__next','body'];
     for(var i=0;i<sels.length;i++){
-      try{ var el=document.querySelector(sels[i]); if(el&&visible(el)) return el; }catch(e){}
+      try{ var n=document.querySelector(sels[i]); if(n&&(n.innerText||'').length>10) return n; }catch(e){}
     }
-    return null;
-  }
-
-  function isChromeLine(t){
-    t=(t||'').trim(); if(!t) return true;
-    return /^(chat|agent|new chat|sign in|sign up|log in|api|terms of service|privacy policy|deep think|max|generated by ai\.?|for reference only\.?|menu|settings|home|upgrade|subscribe)$/i.test(t);
+    return document.body;
   }
 
   function assistantNodes(){
-    var sels=[
-      '[data-message-author-role="assistant"]',
-      '[data-role="assistant"]',
-      '[data-testid*="assistant"]',
-      '.markdown.prose',
-      '.prose'
-    ];
-    var out=[];
-    for(var s=0;s<sels.length;s++){
-      var nodes=document.querySelectorAll(sels[s]);
-      for(var i=0;i<nodes.length;i++) out.push(nodes[i]);
-    }
-    return out;
+    return [].slice.call(document.querySelectorAll('[data-message-author-role="assistant"],[data-role="assistant"],[data-testid*="assistant"],.markdown.prose,.prose'));
   }
 
-  function lastAssistantText(){
-    var nodes=assistantNodes();
-    if(!nodes.length) return '';
-    return (nodes[nodes.length-1].innerText||nodes[nodes.length-1].textContent||'').trim();
+  function lastAssistText(){
+    var n=assistantNodes();
+    if(!n.length) return '';
+    return (n[n.length-1].innerText||n[n.length-1].textContent||'').trim();
   }
 
-  function pageCorpus(){
-    var roots=[];
-    var sels=['[data-message-author-role]','[data-testid*="conversation"]','main','[role="main"]','#__next','body'];
-    for(var i=0;i<sels.length;i++){
-      var n=document.querySelector(sels[i]);
-      if(n&&(n.innerText||'').length>20){ roots.push(n); break; }
-    }
-    if(!roots.length) roots.push(document.body);
-    var raw=(roots[0].innerText||roots[0].textContent||'');
-    return raw.split(/\n+/).map(function(l){return l.trim();}).filter(function(l){return l&&!isChromeLine(l);}).join('\n');
+  function corpus(){
+    var raw=(convRoot().innerText||'');
+    return raw.split(/\n+/).map(function(l){return l.trim();}).filter(function(l){
+      return l && !/^(chat|agent|new chat|sign in|log in|terms of service|privacy policy|menu|settings)$/i.test(l);
+    }).join('\n');
   }
 
-  function fireKey(el,type,key,code,keyCode){
-    try{ el.dispatchEvent(new KeyboardEvent(type,{key:key,code:code,keyCode:keyCode,which:keyCode,bubbles:true,cancelable:true,composed:true})); }catch(e){}
-  }
-  function firePointer(el){
-    ['pointerdown','mousedown','pointerup','mouseup','click'].forEach(function(t){
-      try{
-        var C=t.indexOf('pointer')===0?PointerEvent:MouseEvent;
-        el.dispatchEvent(new C(t,{bubbles:true,cancelable:true,view:window,buttons:1}));
-      }catch(e){ try{ el.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,view:window})); }catch(e2){} }
-    });
-  }
-  function readInputValue(el){
+  function readVal(el){
     if(!el) return '';
     if(el.isContentEditable||el.getAttribute('contenteditable')==='true'||el.getAttribute('role')==='textbox')
       return (el.innerText||el.textContent||'').trim();
     return (el.value||'').trim();
   }
 
-  function fillAll(el,text){
+  function fill(el,text){
     el.focus();
     try{ el.click(); }catch(e){}
     var isEd=el.isContentEditable||el.getAttribute('contenteditable')==='true'||el.getAttribute('role')==='textbox'||(el.classList&&el.classList.contains('ProseMirror'));
     try{
       if(isEd){
-        try{
-          var sel=window.getSelection();
-          var range=document.createRange();
-          range.selectNodeContents(el);
-          sel.removeAllRanges();
-          sel.addRange(range);
-        }catch(e){}
-        try{ document.execCommand('selectAll',false,null); }catch(e){}
-        try{ document.execCommand('delete',false,null); }catch(e){}
+        try{ var sel=window.getSelection(); var range=document.createRange(); range.selectNodeContents(el); sel.removeAllRanges(); sel.addRange(range); }catch(e){}
+        try{ document.execCommand('selectAll',false,null); document.execCommand('delete',false,null); }catch(e){}
         try{ el.dispatchEvent(new InputEvent('beforeinput',{bubbles:true,cancelable:true,inputType:'insertText',data:text})); }catch(e){}
-        var okIns=false;
-        try{ okIns=document.execCommand('insertText',false,text); }catch(e){}
-        if(!okIns){
-          try{ el.textContent=''; el.innerText=text; }catch(e){}
-          try{ el.appendChild(document.createTextNode(text)); }catch(e){}
-        }
+        var okIns=false; try{ okIns=document.execCommand('insertText',false,text); }catch(e){}
+        if(!okIns){ try{ el.innerText=text; }catch(e){ el.textContent=text; } }
         try{ el.dispatchEvent(new InputEvent('input',{bubbles:true,data:text,inputType:'insertText'})); }
         catch(e){ el.dispatchEvent(new Event('input',{bubbles:true})); }
-        el.dispatchEvent(new Event('change',{bubbles:true}));
       } else {
         var proto=el.tagName==='TEXTAREA'?HTMLTextAreaElement.prototype:HTMLInputElement.prototype;
         var desc=Object.getOwnPropertyDescriptor(proto,'value');
@@ -527,170 +485,168 @@ object WebViewChatEngine {
     }catch(e){}
   }
 
-  var lastSendEl=null;
-  var sentOnce=false;
-  function trySubmit(input){
-    if(sentOnce) return true;
-    var attempts=[];
-    var a=findSendByAttr(); if(a) attempts.push(a);
-    var b=findSendSpatial(input); if(b&&attempts.indexOf(b)<0) attempts.push(b);
-    var form=input.closest&&input.closest('form');
-    if(form){ try{ if(typeof form.requestSubmit==='function'){ form.requestSubmit(); lastSendEl=form; } }catch(e){} }
-    for(var i=0;i<attempts.length;i++){
-      var btn=attempts[i]; lastSendEl=btn;
-      try{ btn.removeAttribute('disabled'); btn.disabled=false; btn.setAttribute('aria-disabled','false'); }catch(e){}
-      firePointer(btn); try{ btn.click(); }catch(e){}
-    }
-    fireKey(input,'keydown','Enter','Enter',13);
-    fireKey(input,'keypress','Enter','Enter',13);
-    fireKey(input,'keyup','Enter','Enter',13);
-    try{ input.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true,ctrlKey:true})); }catch(e){}
-    sentOnce=true;
-    return true;
+  function firePointer(el){
+    ['pointerdown','mousedown','pointerup','mouseup','click'].forEach(function(t){
+      try{
+        var C=t.indexOf('pointer')===0?PointerEvent:MouseEvent;
+        el.dispatchEvent(new C(t,{bubbles:true,cancelable:true,view:window,buttons:1}));
+      }catch(e){ try{ el.click(); }catch(e2){} }
+    });
+  }
+  function fireEnter(el){
+    try{
+      el.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true,cancelable:true}));
+      el.dispatchEvent(new KeyboardEvent('keyup',{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true}));
+    }catch(e){}
   }
 
-  state('PREPARING');
-  if(needsAuth()){
-    fail('Not signed in. Providers → Sign in on the chat page → Back.');
-    return;
+  function accepted(el){
+    var v=readVal(el);
+    if(!v) return false;
+    var snip=MSG.slice(0, Math.min(10, MSG.length));
+    if(snip && v.indexOf(snip)>=0) return true;
+    return v.replace(/\s+/g,' ').toLowerCase().indexOf(MSG.replace(/\s+/g,' ').toLowerCase().slice(0,12))>=0;
   }
+
+  // ——— HOT PATH ———
+  state('SESSION_READY');
+  if(needsAuth()){ fail('AUTH_REQUIRED'); return; }
 
   var input=findInput();
-  if(!input){
-    fail('COMPOSER_NOT_FOUND. Open Providers → Sign in → wait until the chat box is visible → Back.');
+  if(!input){ fail('COMPOSER_NOT_FOUND — open chat box on provider then retry'); return; }
+  state('COMPOSER_RESOLVED');
+
+  // Baseline BEFORE mutation
+  var beforeCorpus=corpus();
+  var beforeAssist=lastAssistText();
+  var beforeCount=assistantNodes().length;
+  state('BASELINE_CAPTURED');
+
+  input.focus();
+  state('COMPOSER_FOCUSED');
+  fill(input, MSG);
+
+  // Immediate read-back — fail fast (one recovery fill)
+  if(!accepted(input)){
+    fill(input, MSG);
+  }
+  if(!accepted(input)){
+    fail('INPUT_FAILED — composer did not accept text. Focus the real chat box on the provider page.');
     return;
   }
-  state('COMPOSER_FOUND');
+  state('INPUT_VERIFIED');
 
-  var beforeCorpus = pageCorpus();
-  var beforeAssist = lastAssistantText();
-  var beforeAssistCount = assistantNodes().length;
-
-  fillAll(input, MSG);
-  state('TEXT_ENTERED');
-
-  function textAccepted(){
-    var typed = readInputValue(input);
-    if(!typed) return false;
-    var snip = MSG.slice(0, Math.min(8, MSG.length));
-    if(snip && typed.indexOf(snip) >= 0) return true;
-    var a=typed.replace(/\s+/g,' ').toLowerCase();
-    var b=MSG.replace(/\s+/g,' ').toLowerCase();
-    return a.indexOf(b.slice(0, Math.min(12, b.length))) >= 0;
-  }
-
-  if(!textAccepted()) fillAll(input, MSG);
-  if(!textAccepted()){
-    try{ input.focus(); document.execCommand('selectAll',false,null); document.execCommand('insertText',false,MSG); }catch(e){}
-  }
-  if(!textAccepted()){
-    fail('TEXT_NOT_ACCEPTED — composer did not take the message. Focus the real chat box on the provider page.');
-    return;
-  }
-  state('TEXT_VERIFIED');
-
+  var sendBtn=findSend(input);
+  var lastSend=sendBtn;
   state('SENDING');
-  trySubmit(input);
+  if(sendBtn){
+    try{ sendBtn.removeAttribute('disabled'); sendBtn.disabled=false; }catch(e){}
+    firePointer(sendBtn);
+    try{ sendBtn.click(); }catch(e){}
+  }
+  fireEnter(input);
+  try{
+    var form=input.closest&&input.closest('form');
+    if(form&&form.requestSubmit) form.requestSubmit();
+  }catch(e){}
 
-  var confirmTries=0;
+  // SEND confirm window: tight, event-ish checks, ONE recovery only
+  var confirmTry=0;
   function confirmSend(done){
-    confirmTries++;
-    var left=readInputValue(input);
-    var snippet=MSG.slice(0, Math.min(16, MSG.length));
-    var stillThere = left && snippet && left.indexOf(snippet) >= 0;
-    var gen = isGenerating();
-    var corpus=pageCorpus();
-    var appeared = snippet && corpus.indexOf(snippet)>=0 && (beforeCorpus.indexOf(snippet)<0 || gen);
-    var assistGrew = assistantNodes().length > beforeAssistCount;
-    if(!stillThere || gen || appeared || assistGrew){
+    confirmTry++;
+    var left=readVal(input);
+    var snip=MSG.slice(0, Math.min(12, MSG.length));
+    var still=left && snip && left.indexOf(snip)>=0;
+    var gen=isGenerating();
+    var after=corpus();
+    var appeared=snip && after.indexOf(snip)>=0 && (beforeCorpus.indexOf(snip)<0 || gen);
+    var grew=assistantNodes().length>beforeCount;
+    if(!still || gen || appeared || grew){
       state('SEND_CONFIRMED');
       done(true);
       return;
     }
-    if(confirmTries===1){
-      sentOnce=false;
-      trySubmit(input);
-      setTimeout(function(){ confirmSend(done); }, 180);
+    if(confirmTry===1){
+      // one recovery send
+      if(sendBtn){ firePointer(sendBtn); try{sendBtn.click();}catch(e){} }
+      fireEnter(input);
+      setTimeout(function(){ confirmSend(done); }, 120);
       return;
     }
-    if(confirmTries>=4){ done(false); return; }
-    setTimeout(function(){ confirmSend(done); }, 120);
+    if(confirmTry>=5){ done(false); return; }
+    setTimeout(function(){ confirmSend(done); }, 80);
   }
 
   confirmSend(function(sent){
     if(!sent){
-      fail('SEND_NOT_CONFIRMED — message still in the input. Focus the real chat composer and retry.');
+      fail('SEND_FAILED — message not submitted. Stay on chat UI and retry.');
       return;
     }
 
     state('THINKING');
     var lastEmitted='';
     var lastSeen='';
-    var quietTicks=0;
-    var hadGrowth=false;
-    var startMs=Date.now();
+    var quiet=0;
+    var grew=false;
+    var tStart=Date.now();
 
-    function currentDelta(){
+    function delta(){
       var nodes=assistantNodes();
-      var delta='';
-      if(nodes.length > beforeAssistCount){
-        var last=nodes[nodes.length-1];
-        delta=(last.innerText||last.textContent||'').trim();
+      var d='';
+      if(nodes.length>beforeCount){
+        d=(nodes[nodes.length-1].innerText||'').trim();
       } else {
-        var assist=lastAssistantText();
-        if(assist && assist.length > (beforeAssist||'').length + 1){
-          if(beforeAssist && assist.indexOf(beforeAssist)===0) delta=assist.slice(beforeAssist.length).trim();
-          else if(assist !== beforeAssist) delta=assist;
+        var a=lastAssistText();
+        if(a && a.length>(beforeAssist||'').length+1){
+          if(beforeAssist && a.indexOf(beforeAssist)===0) d=a.slice(beforeAssist.length).trim();
+          else if(a!==beforeAssist) d=a;
         }
-        if(delta.length<2){
-          var after=pageCorpus();
+        if(d.length<2){
+          var after=corpus();
           if(after.length>beforeCorpus.length && after.indexOf(beforeCorpus)===0)
-            delta=after.slice(beforeCorpus.length).trim();
+            d=after.slice(beforeCorpus.length).trim();
         }
       }
-      if(delta.indexOf(MSG)===0) delta=delta.slice(MSG.length).trim();
-      return delta;
+      if(d.indexOf(MSG)===0) d=d.slice(MSG.length).trim();
+      return d;
     }
 
-    function maybeEmit(delta){
-      if(delta && delta.length>1 && delta!==lastEmitted){
-        lastEmitted=delta;
-        state('WRITING');
-        partial(delta);
-        hadGrowth=true;
+    function tick(){
+      var d=delta();
+      if(d && d.length>1 && d!==lastEmitted){
+        lastEmitted=d;
+        state('STREAMING');
+        partial(d);
+        grew=true;
       }
-    }
-
-    function tryFinish(){
-      var delta=currentDelta();
-      maybeEmit(delta);
       var gen=isGenerating();
-      if(gen){ quietTicks=0; return false; }
-      if(delta && delta===lastSeen) quietTicks++; else { quietTicks=0; lastSeen=delta||''; }
-      if(hadGrowth && quietTicks>=3 && !gen){
-        state('DONE');
-        learn(cssPath(input), cssPath(lastSendEl));
-        ok(delta||lastEmitted);
+      if(gen){ quiet=0; return false; }
+      if(d && d===lastSeen) quiet++; else { quiet=0; lastSeen=d||''; }
+      // ~300–450ms quiet after growth + not generating = done
+      if(grew && quiet>=2 && !gen){
+        state('COMPLETED');
+        learn(cssPath(input), cssPath(lastSend), cssPath(convRoot()));
+        ok(d||lastEmitted);
         return true;
       }
       return false;
     }
 
     try{
-      var root=document.querySelector('main,[role="main"],[data-testid*="conversation"],#__next')||document.body;
-      window.__omniObs=new MutationObserver(function(){ tryFinish(); });
-      window.__omniObs.observe(root,{childList:true,subtree:true,characterData:true});
+      window.__omniObs=new MutationObserver(function(){ tick(); });
+      window.__omniObs.observe(convRoot(),{childList:true,subtree:true,characterData:true});
     }catch(e){}
 
+    // Light safety poll only (not primary)
     window.__omniTimer=setInterval(function(){
-      if(tryFinish()) return;
-      if(Date.now()-startMs > 170000){
+      if(tick()) return;
+      if(Date.now()-tStart>85000){
         clearInterval(window.__omniTimer); window.__omniTimer=null;
-        if(window.__omniObs){try{window.__omniObs.disconnect()}catch(e){} window.__omniObs=null;}
-        if(lastEmitted.length>1){ learn(cssPath(input), cssPath(lastSendEl)); ok(lastEmitted); }
-        else fail('REPLY_TIMEOUT (txn '+TXN+')');
+        if(window.__omniObs){try{window.__omniObs.disconnect()}catch(e){}window.__omniObs=null;}
+        if(lastEmitted.length>1){ learn(cssPath(input), cssPath(lastSend), cssPath(convRoot())); ok(lastEmitted); }
+        else fail('REPLY_TIMEOUT txn '+TXN);
       }
-    }, 150);
+    }, 120);
   });
 })();
         """.trimIndent()
