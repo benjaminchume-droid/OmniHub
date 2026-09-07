@@ -6,13 +6,16 @@ import com.omnihub.data.SecureStore
 import com.omnihub.providers.ChatMessage
 import com.omnihub.providers.ChatResponse
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
-import java.util.UUID
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 
 object ProviderBridge {
 
@@ -31,85 +34,118 @@ object ProviderBridge {
         siteUrl: String,
         messages: List<ChatMessage>,
         kind: String = "WEB"
-    ): Flow<StreamToken> = flow {
-        val last = messages.lastOrNull { it.role == "user" }?.content.orEmpty()
-        if (last.isBlank()) {
-            emit(StreamToken("Empty message.", done = true))
-            return@flow
-        }
-
-        if (ProviderCooldown.isCooling(context, providerId)) {
-            emit(StreamToken(ProviderCooldown.message(context, providerId, providerName), done = true))
-            return@flow
-        }
-
-        val reply = try {
-            when {
-                kind.equals("MCP", true) ->
-                    withContext(Dispatchers.IO) {
-                        runMcpAction(context, providerId, providerName, siteUrl, last)
-                    }
-                else ->
-                    // Primary path: real page in WebView (not cookie → OkHttp)
-                    webViewSend(context, providerId, providerName, siteUrl, last)
-            }
-        } catch (e: Exception) {
-            "Could not reach $providerName: ${e.message ?: e.javaClass.simpleName}"
-        }
-
-        if (looksBlocked(reply)) {
-            ProviderCooldown.markBlocked(context, providerId, 15)
-        }
-
-        emit(StreamToken(reply, done = true))
-    }.flowOn(Dispatchers.IO)
+    ): Flow<StreamToken> = streamChatWithFallback(
+        context,
+        listOf(Triple(providerId, providerName, siteUrl)),
+        messages,
+        kind
+    )
 
     /**
-     * Try preferred provider, then other installed sources (skip cooling).
-     * Used when preferred == auto or preferred fails with a hard block.
+     * Live stream: emits cumulative cleaned text as the page grows (done=false),
+     * then a final token (done=true).
      */
     fun streamChatWithFallback(
         context: Context,
-        candidates: List<Triple<String, String, String>>, // id, name, url
+        candidates: List<Triple<String, String, String>>,
         messages: List<ChatMessage>,
         kind: String = "WEB"
-    ): Flow<StreamToken> = flow {
+    ): Flow<StreamToken> = callbackFlow {
         if (candidates.isEmpty()) {
-            emit(StreamToken("No source installed. Open Store → install → Sign in.", done = true))
-            return@flow
+            trySend(StreamToken("No source installed. Open Store → install → Sign in.", done = true))
+            close()
+            return@callbackFlow
         }
-        val errors = mutableListOf<String>()
-        for ((id, name, url) in candidates) {
-            if (ProviderCooldown.isCooling(context, id)) {
-                errors += ProviderCooldown.message(context, id, name)
-                continue
-            }
-            val last = messages.lastOrNull { it.role == "user" }?.content.orEmpty()
-            val reply = try {
-                webViewSend(context, id, name, url, last)
-            } catch (e: Exception) {
-                e.message ?: e.javaClass.simpleName
-            }
-            if (looksBlocked(reply)) {
-                ProviderCooldown.markBlocked(context, id, 15)
-                errors += reply
-                continue
-            }
-            if (reply.startsWith("Not signed in") || reply.contains("input not found", true)) {
-                errors += "$name: $reply"
-                continue
-            }
-            // Success or normal soft error — return to user
-            emit(StreamToken(reply, done = true))
-            return@flow
+        val last = messages.lastOrNull { it.role == "user" }?.content.orEmpty()
+        if (last.isBlank()) {
+            trySend(StreamToken("Empty message.", done = true))
+            close()
+            return@callbackFlow
         }
-        emit(
-            StreamToken(
-                "All providers failed or are cooling down.\n" +
-                    errors.distinct().take(3).joinToString("\n"),
-                done = true
+
+        val job = launch(Dispatchers.IO) {
+            val errors = mutableListOf<String>()
+            for ((id, name, url) in candidates) {
+                if (ProviderCooldown.isCooling(context, id)) {
+                    errors += ProviderCooldown.message(context, id, name)
+                    continue
+                }
+                if (kind.equals("MCP", true)) {
+                    val mcp = runMcpAction(context, id, name, url, last)
+                    trySend(StreamToken(mcp, done = true))
+                    close()
+                    return@launch
+                }
+
+                val host = hostOf(url.ifBlank { "https://chatgpt.com" })
+                val cookies = cookieHeader(
+                    context, id, host, host.removePrefix("www."),
+                    "chatgpt.com", "auth.openai.com"
+                )
+                if (cookies.isBlank() && !ProviderAuthStore.isSignedIn(context, id)) {
+                    errors += "Not signed in to $name"
+                    continue
+                }
+
+                val lastPartial = AtomicReference("")
+                val result = try {
+                    WebViewChatEngine.send(
+                        context = context,
+                        siteUrl = url.ifBlank { "https://$host" },
+                        providerId = id,
+                        userMessage = last,
+                        onPartial = { partial ->
+                            val cleaned = ReplySanitizer.strip(partial)
+                            if (cleaned.isNotBlank() && cleaned != lastPartial.get()) {
+                                lastPartial.set(cleaned)
+                                trySend(StreamToken(cleaned, done = false))
+                            }
+                        }
+                    )
+                } catch (e: Exception) {
+                    WebViewChatEngine.Result(
+                        e.message ?: e.javaClass.simpleName,
+                        false
+                    )
+                }
+
+                val text = if (result.ok) {
+                    ReplySanitizer.strip(result.text).ifBlank { result.text }
+                } else {
+                    val err = result.text
+                    if (looksBlocked(err)) {
+                        ProviderCooldown.markBlocked(context, id, 15)
+                        "$name blocked this session. Cooling down 15m. Switch provider or long-press → Add account."
+                    } else err
+                }
+
+                if (looksBlocked(text)) {
+                    ProviderCooldown.markBlocked(context, id, 15)
+                    errors += text
+                    continue
+                }
+                if (text.startsWith("Not signed in") || text.contains("input not found", true) ||
+                    text.contains("No chat input", true)
+                ) {
+                    errors += "$name: $text"
+                    continue
+                }
+
+                trySend(StreamToken(text, done = true))
+                close()
+                return@launch
+            }
+            trySend(
+                StreamToken(
+                    "All providers failed or are cooling down.\n" +
+                        errors.distinct().take(3).joinToString("\n"),
+                    done = true
+                )
             )
-        )
+            close()
+        }
+
+        awaitClose { job.cancel() }
     }.flowOn(Dispatchers.IO)
 
     suspend fun chatOnce(
@@ -120,58 +156,30 @@ object ProviderBridge {
         messages: List<ChatMessage>,
         kind: String = "WEB"
     ): ChatResponse = withContext(Dispatchers.IO) {
-        val buf = StringBuilder()
+        var last = ""
         streamChat(context, providerId, providerName, siteUrl, messages, kind).collect { tok ->
-            if (tok.text.isNotEmpty()) buf.append(tok.text)
+            if (tok.text.isNotEmpty()) last = tok.text
         }
         ChatResponse(
-            content = buf.toString().ifBlank { "No reply." },
+            content = last.ifBlank { "No reply." },
             model = providerName,
             providerId = providerId
         )
-    }
-
-    private suspend fun webViewSend(
-        context: Context,
-        providerId: String,
-        providerName: String,
-        siteUrl: String,
-        userText: String
-    ): String {
-        // Require a session so the WebView is actually logged in
-        val host = hostOf(siteUrl.ifBlank { "https://chatgpt.com" })
-        val cookies = cookieHeader(context, providerId, host, host.removePrefix("www."),
-            "chatgpt.com", "auth.openai.com")
-        if (cookies.isBlank() && !ProviderAuthStore.isSignedIn(context, providerId)) {
-            return "Not signed in to $providerName. Providers → Sign in → stay on chat → Back."
-        }
-
-        val result = WebViewChatEngine.send(
-            context = context,
-            siteUrl = siteUrl.ifBlank { "https://$host" },
-            providerId = providerId,
-            userMessage = userText
-        )
-        return if (result.ok) result.text
-        else {
-            val err = result.text
-            if (looksBlocked(err)) {
-                ProviderCooldown.markBlocked(context, providerId, 15)
-                "$providerName blocked this session. Cooling down 15m. " +
-                    "Switch provider or long-press → Add account."
-            } else err
-        }
     }
 
     private fun looksBlocked(text: String): Boolean {
         val t = text.lowercase()
         return t.contains("unusual activity") ||
             t.contains("session expired or blocked") ||
-            t.contains("cooling down") && t.contains("blocked")
+            (t.contains("cooling down") && t.contains("blocked"))
     }
 
     private fun hostOf(url: String): String =
-        try { java.net.URI(url).host ?: url } catch (_: Exception) { url }
+        try {
+            java.net.URI(url).host ?: url
+        } catch (_: Exception) {
+            url
+        }
 
     private fun cookieHeader(context: Context, providerId: String, vararg hosts: String): String {
         val active = AccountStore.activeAccountId(context, providerId)
@@ -186,16 +194,22 @@ object ProviderBridge {
             .orEmpty()
 
         val liveParts = linkedSetOf<String>()
-        val cm = try { CookieManager.getInstance() } catch (_: Exception) { null }
+        val cm = try {
+            CookieManager.getInstance()
+        } catch (_: Exception) {
+            null
+        }
         if (cm != null) {
             for (h in hosts) {
                 for (u in listOf("https://$h", "https://www.$h")) {
                     try {
                         val c = cm.getCookie(u).orEmpty()
                         if (c.isNotBlank()) {
-                            c.split(";").map { it.trim() }.filter { it.contains("=") }.forEach { liveParts.add(it) }
+                            c.split(";").map { it.trim() }.filter { it.contains("=") }
+                                .forEach { liveParts.add(it) }
                         }
-                    } catch (_: Exception) {}
+                    } catch (_: Exception) {
+                    }
                 }
             }
         }
