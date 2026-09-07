@@ -41,12 +41,18 @@ object AppUpdateChecker {
         .readTimeout(30, TimeUnit.SECONDS)
         .build()
 
+    /**
+     * Offer an update only when:
+     * - remote versionName is newer than BuildConfig.VERSION_NAME, OR
+     * - same versionName AND remote nightly.# > installed nightly.#
+     * Never offer an older/equal nightly of the same version (fixes 182 vs 183 spam).
+     */
     suspend fun checkOmniHub(
         context: Context,
         owner: String = "benjaminchume-droid",
         repo: String = "OmniHub"
     ): AppUpdateInfo? = withContext(Dispatchers.IO) {
-        val url = "https://api.github.com/repos/$owner/$repo/releases?per_page=20"
+        val url = "https://api.github.com/repos/$owner/$repo/releases?per_page=30"
         val req = Request.Builder().url(url)
             .header("Accept", "application/vnd.github+json")
             .build()
@@ -55,50 +61,40 @@ object AppUpdateChecker {
         val arr = JSONArray(body)
         if (arr.length() == 0) return@withContext null
 
-        val installedTag = context.getSharedPreferences(PREFS, 0)
-            .getString("installed_release_tag", "")
-            .orEmpty()
-        val dismissed = context.getSharedPreferences(PREFS, 0)
-            .getString("dismissed_release_tag", "")
-            .orEmpty()
-
+        val prefs = context.getSharedPreferences(PREFS, 0)
+        val installedTag = prefs.getString("installed_release_tag", "").orEmpty()
+        val dismissed = prefs.getString("dismissed_release_tag", "").orEmpty()
         val local = BuildConfig.VERSION_NAME
+        val localNightly = nightlyNumber(installedTag)
 
         for (i in 0 until arr.length()) {
             val rel = arr.getJSONObject(i)
             val tag = rel.optString("tag_name")
+            if (tag.isBlank() || tag == installedTag || tag == dismissed) continue
+
             var apkUrl: String? = null
             val assets = rel.optJSONArray("assets") ?: continue
             for (j in 0 until assets.length()) {
                 val a = assets.getJSONObject(j)
-                val n = a.optString("name")
-                if (n.endsWith(".apk", true)) {
+                if (a.optString("name").endsWith(".apk", true)) {
                     apkUrl = a.optString("browser_download_url")
                     break
                 }
             }
             if (apkUrl.isNullOrBlank()) continue
-            if (tag == installedTag || tag == dismissed) continue
 
-            val extracted = extractVersion(tag) ?: extractVersion(rel.optString("name"))
-            val candidateNewer = extracted != null && isNewer(extracted, local)
-            val isNightlyTag = tag.contains("nightly", true)
-            val nightlyNew = isNightlyTag && tag != installedTag &&
-                (extracted == null || isNewer(extracted, local) || extracted == local)
+            val extracted = extractVersion(tag) ?: extractVersion(rel.optString("name")) ?: continue
+            val remoteNightly = nightlyNumber(tag)
 
-            // Prefer explicit higher version; also surface new nightly builds of same/higher base
-            if (!candidateNewer && !(isNightlyTag && tag != installedTag && isNewer(extracted ?: "0", local))) {
-                if (!candidateNewer && !isNightlyTag) continue
-                if (isNightlyTag && extracted != null && !isNewer(extracted, local) && extracted != local) continue
-                if (!candidateNewer && isNightlyTag && installedTag == tag) continue
-                if (!candidateNewer && !nightlyNew && extracted != null && !isNewer(extracted, local)) continue
-            }
-            if (!candidateNewer && isNightlyTag && installedTag.isNotBlank() && tag == installedTag) continue
-            if (!candidateNewer && !isNightlyTag) continue
-            if (!candidateNewer && isNightlyTag) {
-                // allow if version in tag is >= local
-                if (extracted != null && isNewer(local, extracted)) continue
-            }
+            val versionNewer = isNewer(extracted, local)
+            val sameVersionNewerNightly =
+                extracted == local &&
+                    remoteNightly != null &&
+                    localNightly != null &&
+                    remoteNightly > localNightly
+
+            // Same version with no installed tag → not an update (already running that versionName)
+            if (!versionNewer && !sameVersionNewerNightly) continue
 
             return@withContext AppUpdateInfo(
                 tag = tag,
@@ -183,6 +179,11 @@ object AppUpdateChecker {
         return m?.groupValues?.getOrNull(1)
     }
 
+    private fun nightlyNumber(tag: String): Int? {
+        val m = Regex("nightly\\.(\\d+)", RegexOption.IGNORE_CASE).find(tag)
+        return m?.groupValues?.getOrNull(1)?.toIntOrNull()
+    }
+
     fun isNewer(remoteTag: String, localVersion: String): Boolean {
         fun parts(s: String): List<Int> {
             val core = s.removePrefix("v")
@@ -193,7 +194,7 @@ object AppUpdateChecker {
         }
         val r = parts(remoteTag)
         val l = parts(localVersion)
-        if (r.isEmpty()) return remoteTag != localVersion
+        if (r.isEmpty()) return false
         val n = maxOf(r.size, l.size)
         for (i in 0 until n) {
             val a = r.getOrElse(i) { 0 }
