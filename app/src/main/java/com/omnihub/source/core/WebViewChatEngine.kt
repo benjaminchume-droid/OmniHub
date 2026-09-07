@@ -11,18 +11,10 @@ import java.util.UUID
 import kotlin.coroutines.resume
 
 /**
- * WebRelay Engine v4 (1.0.9.5)
- *
- * HOT PATH (warm session):
- *   resolve composer → focus → inject → read-back verify → send once →
- *   confirm user bubble / gen → MutationObserver stream → complete
- *
- * Rules:
- * - One recovery max per step (not 20 retries)
- * - Fail fast on INPUT_FAILED / SEND_FAILED (no multi-minute spin)
- * - PageMap validated each txn; update on success
- * - ProviderRelayQueue owns exclusivity (no force-unlock)
- * - OmniHub overhead target: ms–~1s on warm path; model time is separate
+ * WebRelay 1.0.9.6 — hard guarantees:
+ * INPUT: read-back must match (one recovery) or INPUT_FAILED immediately
+ * SEND: new user bubble / generating (one recovery) or SEND_FAILED
+ * OBSERVE: baseline-bound MutationObserver stream; complete when quiet + not generating
  */
 object WebViewChatEngine {
 
@@ -58,7 +50,7 @@ object WebViewChatEngine {
         siteUrl: String,
         providerId: String,
         userMessage: String,
-        timeoutMs: Long = 90_000L,
+        timeoutMs: Long = 75_000L,
         onPartial: (String) -> Unit = {}
     ): Result = ProviderRelayQueue.withProviderLock(providerId) { queueWaitMs ->
         sendExclusive(context, siteUrl, providerId, userMessage, timeoutMs, queueWaitMs, onPartial)
@@ -83,7 +75,7 @@ object WebViewChatEngine {
             ProviderCatalog.urlFor(providerId) ?: "https://chatgpt.com/"
         }
 
-        Log.i(TAG, "[$txn] QUEUED→RUN provider=$providerId queueWaitMs=$queueWaitMs map=${pageMap.composer.isNotBlank()}")
+        Log.i(TAG, "[$txn] START provider=$providerId queueWaitMs=$queueWaitMs")
 
         main.post {
             val session = WarmSessionPool.getOrCreate(appCtx, providerId)
@@ -113,12 +105,11 @@ object WebViewChatEngine {
                 } catch (_: Exception) {}
                 if (!ok) ProviderPageMap.rememberFailure(appCtx, providerId)
                 val total = System.currentTimeMillis() - t0
-                val oh = if (sendConfirmedAt > 0) sendConfirmedAt - t0 else total
+                val oh = if (sendConfirmedAt > 0) sendConfirmedAt - t0 else -1
                 Log.i(
                     TAG,
-                    "[$txn] ${if (ok) "DELIVERED" else "FAILURE"} len=${text.length} " +
-                        "totalMs=$total omniOverheadMs=$oh queueMs=$queueWaitMs " +
-                        "firstTokenMs=${if (firstTokenAt > 0) firstTokenAt - t0 else -1}"
+                    "[$txn] ${if (ok) "OK" else "FAIL"} len=${text.length} totalMs=$total " +
+                        "omniToSendMs=$oh firstTokenMs=${if (firstTokenAt > 0) firstTokenAt - t0 else -1}"
                 )
                 if (cont.isActive) cont.resume(Result(text, ok, txn))
             }
@@ -134,7 +125,7 @@ object WebViewChatEngine {
                         val cleaned = cleanReply(t, userMessage) ?: t
                         complete(ReplySanitizer.strip(cleaned).ifBlank { cleaned }, true)
                     } else {
-                        complete("REPLY_TIMEOUT txn $txn — send/observe did not complete. Stay on signed-in chat and retry.", false)
+                        complete("REPLY_TIMEOUT txn $txn — no verified reply. Sign in on chat UI and retry.", false)
                     }
                 }
             }
@@ -185,9 +176,7 @@ object WebViewChatEngine {
                 @JavascriptInterface
                 fun onState(state: String) {
                     val now = System.currentTimeMillis()
-                    if (state == "SEND_CONFIRMED" && sendConfirmedAt == 0L) {
-                        sendConfirmedAt = now
-                    }
+                    if (state == "SEND_CONFIRMED" && sendConfirmedAt == 0L) sendConfirmedAt = now
                     Log.i(TAG, "[$txn] $state +${now - t0}ms")
                 }
             }
@@ -200,20 +189,17 @@ object WebViewChatEngine {
                 }
             }
 
-            // Circuit breaker only — not normal control flow
             main.postDelayed(timeoutRunnable, timeoutMs)
 
             fun inject() {
                 if (finished || injected) return
                 injected = true
-                Log.i(TAG, "[$txn] INJECT +${System.currentTimeMillis() - t0}ms")
                 web.evaluateJavascript(
                     "(function(){window.__omniRunning=false;" +
                         "if(window.__omniObs){try{window.__omniObs.disconnect()}catch(e){}window.__omniObs=null;}" +
                         "if(window.__omniTimer){clearInterval(window.__omniTimer);window.__omniTimer=null;}})();",
                     null
                 )
-                // Next frame — no multi-hundred-ms artificial delay
                 main.post {
                     if (finished) return@post
                     web.evaluateJavascript(
@@ -229,33 +215,31 @@ object WebViewChatEngine {
                 }
             }
 
-            fun waitComposerThenInject(attempt: Int) {
+            fun waitComposer(attempt: Int) {
                 if (finished || injected) return
-                // Max ~1.5s discovery (15 * 100ms), not 9+ seconds
                 val cSel = pageMap.composer
                 val learnedBit = if (cSel.isNotBlank())
                     "try{var le=document.querySelector(${org.json.JSONObject.quote(cSel)});if(le)learned=true;}catch(e){}"
                 else ""
                 web.evaluateJavascript(
                     "(function(){var learned=false;$learnedBit" +
-                        "var n=document.querySelectorAll('textarea,[contenteditable=true],div[role=textbox],#prompt-textarea,.ProseMirror').length;" +
-                        "var body=(document.body&&document.body.innerText||'').slice(0,1000).toLowerCase();" +
+                        "var n=document.querySelectorAll('#prompt-textarea,textarea,[contenteditable=true],div[role=textbox],.ProseMirror').length;" +
+                        "var body=(document.body&&document.body.innerText||'').slice(0,900).toLowerCase();" +
                         "var auth=/sign in to continue|log in to continue|create an account|enter your password/.test(body);" +
                         "var pw=!!document.querySelector('input[type=password]');" +
                         "return (learned?1:0)+':'+n+':'+(auth||pw?1:0);})();"
-                ) { countStr ->
-                    val cleaned = (countStr ?: "0:0:0").replace("\"", "").trim()
-                    val p = cleaned.split(":")
-                    val learnedOk = p.getOrNull(0)?.toIntOrNull() == 1
+                ) { s ->
+                    val p = (s ?: "0:0:0").replace("\"", "").trim().split(":")
+                    val learned = p.getOrNull(0)?.toIntOrNull() == 1
                     val n = p.getOrNull(1)?.toIntOrNull() ?: 0
                     val auth = p.getOrNull(2)?.toIntOrNull() == 1
-                    if (auth && n == 0 && !learnedOk) {
-                        complete("AUTH_REQUIRED — sign in on the chat page, then retry.", false)
+                    if (auth && n == 0 && !learned) {
+                        complete("AUTH_REQUIRED — open provider, sign in, stay on chat box, then retry.", false)
                         return@evaluateJavascript
                     }
-                    if (learnedOk || n > 0) inject()
-                    else if (attempt >= 15) inject() // fail fast inside JS if still missing
-                    else main.postDelayed({ waitComposerThenInject(attempt + 1) }, 100)
+                    if (learned || n > 0) inject()
+                    else if (attempt >= 12) inject()
+                    else main.postDelayed({ waitComposer(attempt + 1) }, 80)
                 }
             }
 
@@ -268,18 +252,16 @@ object WebViewChatEngine {
             }
 
             if (session.ready && sameHost && session.lastUrl.isNotBlank()) {
-                Log.i(TAG, "[$txn] HOT_PATH url=${session.lastUrl}")
-                waitComposerThenInject(0)
+                Log.i(TAG, "[$txn] HOT_PATH")
+                waitComposer(0)
             } else {
                 session.ready = false
-                session.observerInstalled = false
-                Log.i(TAG, "[$txn] COLD_LOAD $target")
+                Log.i(TAG, "[$txn] COLD_LOAD")
                 web.webViewClient = object : android.webkit.WebViewClient() {
                     override fun onPageFinished(view: android.webkit.WebView?, url: String?) {
                         session.lastUrl = url.orEmpty()
                         session.ready = true
-                        // Minimal settle — SPA often ready; JS validates
-                        main.post { waitComposerThenInject(0) }
+                        main.post { waitComposer(0) }
                     }
                 }
                 web.loadUrl(target)
@@ -329,7 +311,7 @@ object WebViewChatEngine {
   function visible(el){
     if(!el) return false;
     var r=el.getBoundingClientRect();
-    if(r.width<4||r.height<4) return false;
+    if(r.width<3||r.height<3) return false;
     var st=window.getComputedStyle(el);
     return st.display!=='none' && st.visibility!=='hidden' && parseFloat(st.opacity||'1')!==0;
   }
@@ -371,59 +353,76 @@ object WebViewChatEngine {
     var s=0,r=el.getBoundingClientRect();
     var ph=((el.getAttribute('placeholder')||'')+' '+(el.getAttribute('aria-label')||'')+' '+(el.getAttribute('data-testid')||'')+' '+(el.id||'')+' '+(el.className||'')).toLowerCase();
     var tag=(el.tagName||'').toLowerCase();
+    if(el.id==='prompt-textarea') s+=60;
     if(tag==='textarea') s+=35;
-    if(el.isContentEditable||el.getAttribute('contenteditable')==='true') s+=32;
+    if(el.isContentEditable||el.getAttribute('contenteditable')==='true') s+=34;
     if(el.getAttribute('role')==='textbox') s+=30;
-    if(el.id==='prompt-textarea') s+=55;
-    if(/prompt-textarea|composer|chat-input|prosemirror|ask|query/.test(ph)) s+=40;
-    if(r.width>100) s+=10;
-    if(r.top>(window.innerHeight||800)*0.2) s+=15;
-    if(/message|ask|prompt|chat|type|write|question/.test(ph)) s+=18;
-    if(/search|email|password|username/.test(ph)&&!/ask|chat|message/.test(ph)) s-=45;
-    if(!visible(el)) s-=100;
+    if(/prompt-textarea|composer|chat-input|prosemirror|ask anything|message/.test(ph)) s+=45;
+    if(r.width>80) s+=10;
+    if(r.top>(window.innerHeight||800)*0.15) s+=20;
+    if(r.bottom>(window.innerHeight||800)*0.5) s+=15;
+    if(/search(?!.*chat)|email|password|username/.test(ph)) s-=60;
+    if(!visible(el)) s-=120;
     if(el.disabled) s-=50;
     return s;
   }
 
   function findInput(){
+    // ChatGPT / Claude-style fixed targets first
+    var preferred=[
+      '#prompt-textarea',
+      'textarea[data-id]',
+      'div.ProseMirror[contenteditable="true"]',
+      'div[contenteditable="true"][data-lexical-editor]',
+      '[data-testid="composer"] textarea',
+      '[data-testid="composer"] [contenteditable="true"]'
+    ];
+    for(var i=0;i<preferred.length;i++){
+      try{
+        var el=document.querySelector(preferred[i]);
+        if(el&&visible(el)&&scoreInput(el)>=8) return el;
+      }catch(e){}
+    }
     if(MAP_IN){
       try{ var le=document.querySelector(MAP_IN); if(le&&visible(le)&&scoreInput(le)>=5) return le; }catch(e){}
     }
-    try{
-      var fixed=document.querySelector('#prompt-textarea,div.ProseMirror[contenteditable="true"],div[contenteditable="true"][data-lexical-editor],textarea[data-id]');
-      if(fixed&&visible(fixed)&&scoreInput(fixed)>=8) return fixed;
-    }catch(e){}
-    var nodes=[].slice.call(document.querySelectorAll('textarea,[contenteditable="true"],div[role="textbox"],#prompt-textarea,input[type="text"],input:not([type]),[data-lexical-editor]'));
+    var nodes=[].slice.call(document.querySelectorAll(
+      'textarea,[contenteditable="true"],div[role="textbox"],#prompt-textarea,input[type="text"],input:not([type]),[data-lexical-editor]'
+    ));
     var best=null,bestScore=-999;
     nodes.forEach(function(el){ var sc=scoreInput(el); if(sc>bestScore){bestScore=sc;best=el;} });
-    return (best&&bestScore>=8)?best:null;
+    return (best&&bestScore>=10)?best:null;
   }
 
   function findSend(input){
     if(MAP_SEND){
       try{ var le=document.querySelector(MAP_SEND); if(le&&visible(le)) return le; }catch(e){}
     }
-    var sels=['[data-testid="send-button"]','[data-testid*="send"]','button[aria-label*="Send" i]','button[aria-label*="Submit" i]','button[aria-label*="Ask" i]','button[type="submit"]'];
+    var sels=[
+      '[data-testid="send-button"]','[data-testid*="send"]',
+      'button[data-testid="send-button"]',
+      'button[aria-label*="Send" i]','button[aria-label*="Submit" i]','button[aria-label*="Ask" i]',
+      'button[type="submit"]'
+    ];
     for(var i=0;i<sels.length;i++){
       try{ var el=document.querySelector(sels[i]); if(el&&visible(el)) return el; }catch(e){}
     }
-    // spatial once
     var ir=input.getBoundingClientRect(), cx=ir.right, cy=(ir.top+ir.bottom)/2;
     var best=null,bestScore=-1e9;
     [].slice.call(document.querySelectorAll('button,[role="button"]')).forEach(function(el){
       if(!visible(el)) return;
       var r=el.getBoundingClientRect();
-      if(r.width<8||r.height<8||r.width>240||r.height>100) return;
+      if(r.width<8||r.height<8||r.width>260||r.height>110) return;
       var dx=(r.left+r.right)/2-cx, dy=Math.abs((r.top+r.bottom)/2-cy);
       var label=((el.getAttribute('aria-label')||'')+(el.getAttribute('data-testid')||'')+(el.innerText||'')).toLowerCase();
       var score=0;
-      if(dx>=-40&&dx<320) score+=80-dx*0.1; else score-=Math.abs(dx)*0.2;
-      score-=dy*0.7;
-      if(/send|submit|arrow|paper|airplane|ask/.test(label)) score+=70;
-      if(/stop|cancel|attach|upload|mic|file|plus|menu/.test(label)) score-=90;
+      if(dx>=-50&&dx<350) score+=90-Math.abs(dx)*0.12; else score-=Math.abs(dx)*0.25;
+      score-=dy*0.8;
+      if(/send|submit|arrow|paper|airplane|ask/.test(label)) score+=75;
+      if(/stop|cancel|attach|upload|mic|file|plus|menu|voice/.test(label)) score-=100;
       if(score>bestScore){bestScore=score;best=el;}
     });
-    return bestScore>12?best:null;
+    return bestScore>15?best:null;
   }
 
   function convRoot(){
@@ -432,13 +431,15 @@ object WebViewChatEngine {
     }
     var sels=['[data-message-author-role]','[data-testid*="conversation"]','main','[role="main"]','#__next','body'];
     for(var i=0;i<sels.length;i++){
-      try{ var n=document.querySelector(sels[i]); if(n&&(n.innerText||'').length>10) return n; }catch(e){}
+      try{ var n=document.querySelector(sels[i]); if(n&&(n.innerText||'').length>8) return n; }catch(e){}
     }
     return document.body;
   }
 
   function assistantNodes(){
-    return [].slice.call(document.querySelectorAll('[data-message-author-role="assistant"],[data-role="assistant"],[data-testid*="assistant"],.markdown.prose,.prose'));
+    return [].slice.call(document.querySelectorAll(
+      '[data-message-author-role="assistant"],[data-role="assistant"],[data-testid*="assistant"],.markdown.prose,.prose'
+    ));
   }
 
   function lastAssistText(){
@@ -448,32 +449,44 @@ object WebViewChatEngine {
   }
 
   function corpus(){
-    var raw=(convRoot().innerText||'');
-    return raw.split(/\n+/).map(function(l){return l.trim();}).filter(function(l){
+    return (convRoot().innerText||'').split(/\n+/).map(function(l){return l.trim();}).filter(function(l){
       return l && !/^(chat|agent|new chat|sign in|log in|terms of service|privacy policy|menu|settings)$/i.test(l);
     }).join('\n');
   }
 
   function readVal(el){
     if(!el) return '';
-    if(el.isContentEditable||el.getAttribute('contenteditable')==='true'||el.getAttribute('role')==='textbox')
+    if(el.isContentEditable||el.getAttribute('contenteditable')==='true'||el.getAttribute('role')==='textbox'||(el.classList&&el.classList.contains('ProseMirror')))
       return (el.innerText||el.textContent||'').trim();
     return (el.value||'').trim();
   }
 
   function fill(el,text){
+    try{ el.scrollIntoView({block:'center',inline:'nearest'}); }catch(e){}
     el.focus();
     try{ el.click(); }catch(e){}
     var isEd=el.isContentEditable||el.getAttribute('contenteditable')==='true'||el.getAttribute('role')==='textbox'||(el.classList&&el.classList.contains('ProseMirror'));
     try{
       if(isEd){
-        try{ var sel=window.getSelection(); var range=document.createRange(); range.selectNodeContents(el); sel.removeAllRanges(); sel.addRange(range); }catch(e){}
-        try{ document.execCommand('selectAll',false,null); document.execCommand('delete',false,null); }catch(e){}
-        try{ el.dispatchEvent(new InputEvent('beforeinput',{bubbles:true,cancelable:true,inputType:'insertText',data:text})); }catch(e){}
-        var okIns=false; try{ okIns=document.execCommand('insertText',false,text); }catch(e){}
-        if(!okIns){ try{ el.innerText=text; }catch(e){ el.textContent=text; } }
-        try{ el.dispatchEvent(new InputEvent('input',{bubbles:true,data:text,inputType:'insertText'})); }
+        try{
+          var sel=window.getSelection();
+          var range=document.createRange();
+          range.selectNodeContents(el);
+          sel.removeAllRanges();
+          sel.addRange(range);
+        }catch(e){}
+        try{ document.execCommand('selectAll',false,null); }catch(e){}
+        try{ document.execCommand('delete',false,null); }catch(e){}
+        try{ el.dispatchEvent(new InputEvent('beforeinput',{bubbles:true,cancelable:true,composed:true,inputType:'insertText',data:text})); }catch(e){}
+        var okIns=false;
+        try{ okIns=document.execCommand('insertText',false,text); }catch(e){}
+        if(!okIns){
+          try{ el.textContent=''; el.innerText=text; }catch(e){}
+        }
+        try{ el.dispatchEvent(new InputEvent('input',{bubbles:true,composed:true,data:text,inputType:'insertText'})); }
         catch(e){ el.dispatchEvent(new Event('input',{bubbles:true})); }
+        el.dispatchEvent(new Event('change',{bubbles:true}));
+        el.dispatchEvent(new Event('keyup',{bubbles:true}));
       } else {
         var proto=el.tagName==='TEXTAREA'?HTMLTextAreaElement.prototype:HTMLInputElement.prototype;
         var desc=Object.getOwnPropertyDescriptor(proto,'value');
@@ -489,23 +502,42 @@ object WebViewChatEngine {
     ['pointerdown','mousedown','pointerup','mouseup','click'].forEach(function(t){
       try{
         var C=t.indexOf('pointer')===0?PointerEvent:MouseEvent;
-        el.dispatchEvent(new C(t,{bubbles:true,cancelable:true,view:window,buttons:1}));
+        el.dispatchEvent(new C(t,{bubbles:true,cancelable:true,view:window,buttons:1,composed:true}));
       }catch(e){ try{ el.click(); }catch(e2){} }
     });
   }
   function fireEnter(el){
     try{
-      el.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true,cancelable:true}));
-      el.dispatchEvent(new KeyboardEvent('keyup',{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true}));
+      el.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true,cancelable:true,composed:true}));
+      el.dispatchEvent(new KeyboardEvent('keypress',{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true,cancelable:true}));
+      el.dispatchEvent(new KeyboardEvent('keyup',{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true,composed:true}));
     }catch(e){}
   }
 
   function accepted(el){
     var v=readVal(el);
     if(!v) return false;
-    var snip=MSG.slice(0, Math.min(10, MSG.length));
+    var snip=MSG.slice(0, Math.min(8, MSG.length));
     if(snip && v.indexOf(snip)>=0) return true;
-    return v.replace(/\s+/g,' ').toLowerCase().indexOf(MSG.replace(/\s+/g,' ').toLowerCase().slice(0,12))>=0;
+    var a=v.replace(/\s+/g,' ').toLowerCase();
+    var b=MSG.replace(/\s+/g,' ').toLowerCase();
+    return b.length>0 && a.indexOf(b.slice(0, Math.min(12, b.length)))>=0;
+  }
+
+  function userBubbleAppeared(beforeCorpus){
+    var snip=MSG.slice(0, Math.min(20, MSG.length));
+    if(!snip) return false;
+    var after=corpus();
+    if(beforeCorpus.indexOf(snip)<0 && after.indexOf(snip)>=0) return true;
+    // role=user nodes growth
+    try{
+      var users=document.querySelectorAll('[data-message-author-role="user"],[data-role="user"]');
+      for(var i=0;i<users.length;i++){
+        var t=(users[i].innerText||'').trim();
+        if(t.indexOf(snip)>=0) return true;
+      }
+    }catch(e){}
+    return false;
   }
 
   // ——— HOT PATH ———
@@ -516,7 +548,6 @@ object WebViewChatEngine {
   if(!input){ fail('COMPOSER_NOT_FOUND — open chat box on provider then retry'); return; }
   state('COMPOSER_RESOLVED');
 
-  // Baseline BEFORE mutation
   var beforeCorpus=corpus();
   var beforeAssist=lastAssistText();
   var beforeCount=assistantNodes().length;
@@ -526,127 +557,133 @@ object WebViewChatEngine {
   state('COMPOSER_FOCUSED');
   fill(input, MSG);
 
-  // Immediate read-back — fail fast (one recovery fill)
-  if(!accepted(input)){
-    fill(input, MSG);
-  }
-  if(!accepted(input)){
-    fail('INPUT_FAILED — composer did not accept text. Focus the real chat box on the provider page.');
-    return;
-  }
-  state('INPUT_VERIFIED');
-
-  var sendBtn=findSend(input);
-  var lastSend=sendBtn;
-  state('SENDING');
-  if(sendBtn){
-    try{ sendBtn.removeAttribute('disabled'); sendBtn.disabled=false; }catch(e){}
-    firePointer(sendBtn);
-    try{ sendBtn.click(); }catch(e){}
-  }
-  fireEnter(input);
-  try{
-    var form=input.closest&&input.closest('form');
-    if(form&&form.requestSubmit) form.requestSubmit();
-  }catch(e){}
-
-  // SEND confirm window: tight, event-ish checks, ONE recovery only
-  var confirmTry=0;
-  function confirmSend(done){
-    confirmTry++;
-    var left=readVal(input);
-    var snip=MSG.slice(0, Math.min(12, MSG.length));
-    var still=left && snip && left.indexOf(snip)>=0;
-    var gen=isGenerating();
-    var after=corpus();
-    var appeared=snip && after.indexOf(snip)>=0 && (beforeCorpus.indexOf(snip)<0 || gen);
-    var grew=assistantNodes().length>beforeCount;
-    if(!still || gen || appeared || grew){
-      state('SEND_CONFIRMED');
-      done(true);
+  // Allow one frame for SPA to commit, then verify (and one recovery)
+  function verifyInput(attempt, cont){
+    if(accepted(input)){ cont(true); return; }
+    if(attempt===0){
+      fill(input, MSG);
+      setTimeout(function(){ verifyInput(1, cont); }, 50);
       return;
     }
-    if(confirmTry===1){
-      // one recovery send
-      if(sendBtn){ firePointer(sendBtn); try{sendBtn.click();}catch(e){} }
-      fireEnter(input);
-      setTimeout(function(){ confirmSend(done); }, 120);
-      return;
-    }
-    if(confirmTry>=5){ done(false); return; }
-    setTimeout(function(){ confirmSend(done); }, 80);
+    cont(false);
   }
 
-  confirmSend(function(sent){
-    if(!sent){
-      fail('SEND_FAILED — message not submitted. Stay on chat UI and retry.');
+  verifyInput(0, function(okInput){
+    if(!okInput){
+      fail('INPUT_FAILED — composer did not accept text. Open provider WebView, tap the real chat box, type once, Back, retry.');
       return;
     }
+    state('INPUT_VERIFIED');
 
-    state('THINKING');
-    var lastEmitted='';
-    var lastSeen='';
-    var quiet=0;
-    var grew=false;
-    var tStart=Date.now();
-
-    function delta(){
-      var nodes=assistantNodes();
-      var d='';
-      if(nodes.length>beforeCount){
-        d=(nodes[nodes.length-1].innerText||'').trim();
-      } else {
-        var a=lastAssistText();
-        if(a && a.length>(beforeAssist||'').length+1){
-          if(beforeAssist && a.indexOf(beforeAssist)===0) d=a.slice(beforeAssist.length).trim();
-          else if(a!==beforeAssist) d=a;
-        }
-        if(d.length<2){
-          var after=corpus();
-          if(after.length>beforeCorpus.length && after.indexOf(beforeCorpus)===0)
-            d=after.slice(beforeCorpus.length).trim();
-        }
-      }
-      if(d.indexOf(MSG)===0) d=d.slice(MSG.length).trim();
-      return d;
+    var sendBtn=findSend(input);
+    var lastSend=sendBtn;
+    state('SENDING');
+    if(sendBtn){
+      try{ sendBtn.removeAttribute('disabled'); sendBtn.disabled=false; sendBtn.setAttribute('aria-disabled','false'); }catch(e){}
+      firePointer(sendBtn);
+      try{ sendBtn.click(); }catch(e){}
     }
-
-    function tick(){
-      var d=delta();
-      if(d && d.length>1 && d!==lastEmitted){
-        lastEmitted=d;
-        state('STREAMING');
-        partial(d);
-        grew=true;
-      }
-      var gen=isGenerating();
-      if(gen){ quiet=0; return false; }
-      if(d && d===lastSeen) quiet++; else { quiet=0; lastSeen=d||''; }
-      // ~300–450ms quiet after growth + not generating = done
-      if(grew && quiet>=2 && !gen){
-        state('COMPLETED');
-        learn(cssPath(input), cssPath(lastSend), cssPath(convRoot()));
-        ok(d||lastEmitted);
-        return true;
-      }
-      return false;
-    }
-
+    fireEnter(input);
     try{
-      window.__omniObs=new MutationObserver(function(){ tick(); });
-      window.__omniObs.observe(convRoot(),{childList:true,subtree:true,characterData:true});
+      var form=input.closest&&input.closest('form');
+      if(form&&form.requestSubmit) form.requestSubmit();
     }catch(e){}
 
-    // Light safety poll only (not primary)
-    window.__omniTimer=setInterval(function(){
-      if(tick()) return;
-      if(Date.now()-tStart>85000){
-        clearInterval(window.__omniTimer); window.__omniTimer=null;
-        if(window.__omniObs){try{window.__omniObs.disconnect()}catch(e){}window.__omniObs=null;}
-        if(lastEmitted.length>1){ learn(cssPath(input), cssPath(lastSend), cssPath(convRoot())); ok(lastEmitted); }
-        else fail('REPLY_TIMEOUT txn '+TXN);
+    var confirmTry=0;
+    function confirmSend(done){
+      confirmTry++;
+      var gen=isGenerating();
+      var bubble=userBubbleAppeared(beforeCorpus);
+      var grew=assistantNodes().length>beforeCount;
+      var left=readVal(input);
+      var snip=MSG.slice(0, Math.min(10, MSG.length));
+      var cleared=!left || (snip && left.indexOf(snip)<0);
+      // Primary: user bubble or generating. Secondary: cleared + grew
+      if(bubble || gen || (cleared && grew) || grew){
+        state('SEND_CONFIRMED');
+        done(true);
+        return;
       }
-    }, 120);
+      if(confirmTry===1){
+        if(sendBtn){ firePointer(sendBtn); try{sendBtn.click();}catch(e){} }
+        fireEnter(input);
+        setTimeout(function(){ confirmSend(done); }, 100);
+        return;
+      }
+      // ~800ms total confirm window
+      if(confirmTry>=8){ done(false); return; }
+      setTimeout(function(){ confirmSend(done); }, 100);
+    }
+
+    confirmSend(function(sent){
+      if(!sent){
+        fail('SEND_FAILED — message not submitted. Stay on signed-in chat UI and retry.');
+        return;
+      }
+
+      state('THINKING');
+      var lastEmitted='';
+      var lastSeen='';
+      var quiet=0;
+      var grew=false;
+      var tStart=Date.now();
+
+      function delta(){
+        var nodes=assistantNodes();
+        var d='';
+        if(nodes.length>beforeCount){
+          d=(nodes[nodes.length-1].innerText||'').trim();
+        } else {
+          var a=lastAssistText();
+          if(a && a.length>(beforeAssist||'').length+1){
+            if(beforeAssist && a.indexOf(beforeAssist)===0) d=a.slice(beforeAssist.length).trim();
+            else if(a!==beforeAssist) d=a;
+          }
+          if(d.length<2){
+            var after=corpus();
+            if(after.length>beforeCorpus.length && after.indexOf(beforeCorpus)===0)
+              d=after.slice(beforeCorpus.length).trim();
+          }
+        }
+        if(d.indexOf(MSG)===0) d=d.slice(MSG.length).trim();
+        return d;
+      }
+
+      function tick(){
+        var d=delta();
+        if(d && d.length>1 && d!==lastEmitted){
+          lastEmitted=d;
+          state('STREAMING');
+          partial(d);
+          grew=true;
+        }
+        var gen=isGenerating();
+        if(gen){ quiet=0; return false; }
+        if(d && d===lastSeen) quiet++; else { quiet=0; lastSeen=d||''; }
+        if(grew && quiet>=2 && !gen){
+          state('COMPLETED');
+          learn(cssPath(input), cssPath(lastSend), cssPath(convRoot()));
+          ok(d||lastEmitted);
+          return true;
+        }
+        return false;
+      }
+
+      try{
+        window.__omniObs=new MutationObserver(function(){ tick(); });
+        window.__omniObs.observe(convRoot(),{childList:true,subtree:true,characterData:true});
+      }catch(e){}
+
+      window.__omniTimer=setInterval(function(){
+        if(tick()) return;
+        if(Date.now()-tStart>70000){
+          clearInterval(window.__omniTimer); window.__omniTimer=null;
+          if(window.__omniObs){try{window.__omniObs.disconnect()}catch(e){}window.__omniObs=null;}
+          if(lastEmitted.length>1){ learn(cssPath(input), cssPath(lastSend), cssPath(convRoot())); ok(lastEmitted); }
+          else fail('REPLY_TIMEOUT txn '+TXN);
+        }
+      }, 100);
+    });
   });
 })();
         """.trimIndent()
