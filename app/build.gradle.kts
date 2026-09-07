@@ -12,8 +12,8 @@ android {
         applicationId = "com.omnihub"
         minSdk = 26
         targetSdk = 35
-        versionCode = 10903
-        versionName = "1.0.9.3"
+        versionCode = 10904
+        versionName = "1.0.9.4"
     }
 
     signingConfigs {

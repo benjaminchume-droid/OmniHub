@@ -3,7 +3,7 @@ package com.omnihub.source.core
 import android.content.Context
 
 /**
- * Layout memory with success/failure confidence decay.
+ * Per-provider layout memory: composer + send selectors with success/fail decay.
  */
 object InteractionMemory {
     private const val PREFS = "omni_interaction_memory"
@@ -13,7 +13,6 @@ object InteractionMemory {
         val sel = p.getString("in_$providerId", null) ?: return null
         val ok = p.getInt("in_ok_$providerId", 0)
         val fail = p.getInt("in_fail_$providerId", 0)
-        // decay: if more fails than successes recently, skip learned
         if (fail >= 3 && fail > ok) return null
         return sel
     }

@@ -13,7 +13,7 @@ import java.util.concurrent.ConcurrentHashMap
 
 /**
  * One long-lived WebView per provider (multi-turn thread continuity).
- * Per-session mutex via [Session.busy]. LRU release under memory pressure.
+ * [Session.busy] is informational; exclusive access is [ProviderRelayQueue].
  */
 object WarmSessionPool {
 
@@ -36,7 +36,6 @@ object WarmSessionPool {
             it.lastUsedAt = System.currentTimeMillis()
             return it
         }
-        // Evict least-recently-used if over capacity
         if (sessions.size >= MAX_SESSIONS) {
             val victim = sessions.entries
                 .filter { !it.value.busy }
@@ -79,10 +78,6 @@ object WarmSessionPool {
     fun runOnMain(block: () -> Unit) {
         if (Looper.myLooper() == Looper.getMainLooper()) block()
         else main.post(block)
-    }
-
-    fun forceUnlock(providerId: String) {
-        sessions[providerId]?.busy = false
     }
 
     fun release(providerId: String) {
