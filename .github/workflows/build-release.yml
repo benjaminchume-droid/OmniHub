@@ -67,7 +67,7 @@ jobs:
         id: ver
         run: |
           VN=$(grep -E 'versionName\s*=' app/build.gradle.kts | head -1 | sed -E 's/.*versionName\s*=\s*"([^"]+)".*/\1/')
-          if [ -z "$VN" ]; then VN="1.0.9.6"; fi
+          if [ -z "$VN" ]; then VN="1.0.9.7"; fi
           echo "version=$VN" >> $GITHUB_OUTPUT
           echo "Resolved versionName=$VN"
 
@@ -122,12 +122,13 @@ jobs:
             App versionName: **${{ steps.ver.outputs.version }}**
             Channel: **${{ steps.meta.outputs.channel }}**
 
-            ### 1.0.9.6 WebRelay
-            - Hard INPUT read-back (ChatGPT/Perplexity ProseMirror path)
-            - SEND confirm via user bubble / generating (not guess-click)
-            - Baseline-bound MutationObserver streaming
-            - Update sensing: version + nightly# only (no 182/183 false prompts)
-            - Per-provider queue, no force-unlock
+            ### 1.0.9.7 WebRelay (universal)
+            - Conversation **fingerprint baseline** (structure-agnostic)
+            - SEND confirmed only on **user-turn evidence** or generating UI
+            - REPLY primary = **delta after baseline**; role/class selectors are boosts only
+            - Timeout salvage uses main/body tail + user-message split
+            - Same path for ChatGPT / Perplexity / S.ai / all providers
+            - No per-provider product fork; queue + fail-fast INPUT kept
 
             Install the APK attached to this release.
           files: ${{ steps.meta.outputs.apk }}
