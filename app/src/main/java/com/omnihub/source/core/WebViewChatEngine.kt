@@ -72,9 +72,8 @@ object WebViewChatEngine {
             var finished = false
             var injected = false
 
-            val timeoutRunnable = Runnable {
-                completeTimeout()
-            }
+            // Must be lateinit so the Runnable can close over it after complete is defined
+            lateinit var timeoutRunnable: Runnable
 
             fun complete(text: String, ok: Boolean) {
                 if (finished) return
@@ -87,7 +86,7 @@ object WebViewChatEngine {
                 if (cont.isActive) cont.resume(Result(text, ok))
             }
 
-            fun completeTimeout() {
+            timeoutRunnable = Runnable {
                 complete(
                     "Timed out waiting for the model. Stay signed in on the chat page and retry.",
                     false
