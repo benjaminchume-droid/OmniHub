@@ -12,8 +12,8 @@ import android.webkit.WebViewClient
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * One long-lived WebView per provider so multi-turn stays on the same page.
- * Main-thread only for WebView access.
+ * One long-lived WebView per provider (multi-turn thread continuity).
+ * Per-session mutex via [Session.busy]. LRU release under memory pressure.
  */
 object WarmSessionPool {
 
@@ -21,15 +21,28 @@ object WarmSessionPool {
         val web: WebView,
         var ready: Boolean = false,
         var lastUrl: String = "",
-        var busy: Boolean = false
+        @Volatile var busy: Boolean = false,
+        var lastUsedAt: Long = System.currentTimeMillis(),
+        var lastTransactionId: String = ""
     )
 
     private val main = Handler(Looper.getMainLooper())
     private val sessions = ConcurrentHashMap<String, Session>()
+    private const val MAX_SESSIONS = 4
 
     @SuppressLint("SetJavaScriptEnabled")
     fun getOrCreate(context: Context, providerId: String): Session {
-        sessions[providerId]?.let { return it }
+        sessions[providerId]?.let {
+            it.lastUsedAt = System.currentTimeMillis()
+            return it
+        }
+        // Evict least-recently-used if over capacity
+        if (sessions.size >= MAX_SESSIONS) {
+            val victim = sessions.entries
+                .filter { !it.value.busy }
+                .minByOrNull { it.value.lastUsedAt }
+            victim?.key?.let { release(it) }
+        }
         val app = context.applicationContext
         val web = WebView(app)
         try {
@@ -68,10 +81,15 @@ object WarmSessionPool {
         else main.post(block)
     }
 
+    fun forceUnlock(providerId: String) {
+        sessions[providerId]?.busy = false
+    }
+
     fun release(providerId: String) {
         runOnMain {
             sessions.remove(providerId)?.let { s ->
                 try {
+                    s.busy = false
                     s.web.stopLoading()
                     s.web.destroy()
                 } catch (_: Exception) {
