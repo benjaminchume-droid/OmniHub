@@ -1,14 +1,26 @@
 name: Build & Release APK
 
+# Only workflow in this repo. One build at a time; workflow-only commits do not rebuild.
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
     inputs:
       channel:
         description: 'nightly (default) or stable'
         required: false
         default: 'nightly'
+  push:
+    branches: [main]
+    paths:
+      - 'app/**'
+      - 'build.gradle.kts'
+      - 'settings.gradle.kts'
+      - 'gradle/**'
+      - 'gradle.properties'
+
+# Cancel older runs when a new one starts (stops stacked #191/#192/#193 waste)
+concurrency:
+  group: omnihub-build-release
+  cancel-in-progress: true
 
 permissions:
   contents: write
@@ -123,12 +135,10 @@ jobs:
             Channel: **${{ steps.meta.outputs.channel }}**
 
             ### 1.0.9.8 — accuracy + speed
-            - **Last-turn extract** after user message (no multi-turn dump)
-            - Strip chrome: Flash / Deep Think / "You said" / disclaimers / "can make mistakes"
-            - Suppress partial user-echo fragments (e.g. "ey")
-            - Faster quiet completion (~180ms after growth)
-            - **Hard stop 60s** (was ~90s)
-            - Still universal — not one-site-only selectors
+            - Last-turn extract, chrome/disclaimer strip
+            - Suppress partial user-echo
+            - Hard stop 60s
+            - Universal WebRelay path
 
             Install the APK attached to this release.
           files: ${{ steps.meta.outputs.apk }}
