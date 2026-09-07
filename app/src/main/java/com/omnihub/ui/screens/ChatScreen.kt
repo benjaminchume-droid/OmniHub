@@ -1,8 +1,12 @@
 package com.omnihub.ui.screens
 
-import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -61,6 +65,31 @@ private fun timeGreeting(name: String): String {
     return "$head\n${GREETINGS[hour % GREETINGS.size]}"
 }
 
+@Composable
+private fun BounceDots() {
+    val t = rememberInfiniteTransition(label = "dots")
+    Row(horizontalArrangement = Arrangement.spacedBy(5.dp), verticalAlignment = Alignment.CenterVertically) {
+        repeat(3) { i ->
+            val y by t.animateFloat(
+                initialValue = 0f,
+                targetValue = -7f,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(380, delayMillis = i * 120),
+                    repeatMode = RepeatMode.Reverse
+                ),
+                label = "dot$i"
+            )
+            Box(
+                Modifier
+                    .offset(y = y.dp)
+                    .size(7.dp)
+                    .clip(CircleShape)
+                    .background(OmniAmber)
+            )
+        }
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun ChatScreen(
@@ -82,6 +111,7 @@ fun ChatScreen(
     var messages by remember { mutableStateOf(listOf<ChatBubble>()) }
     var input by remember { mutableStateOf("") }
     var sending by remember { mutableStateOf(false) }
+    var answering by remember { mutableStateOf(false) }
     var conversations by remember { mutableStateOf(listOf<ConversationEntity>()) }
     var projects by remember { mutableStateOf(listOf<com.omnihub.history.ProjectEntity>()) }
     var incognito by remember { mutableStateOf(UserPrefs.isIncognito(context)) }
@@ -164,6 +194,7 @@ fun ChatScreen(
         pendingAttachments = emptyList()
         keyboard?.hide()
         sending = true
+        answering = false
         uiLocked = true
         val baseline = messages
         messages = baseline + ChatBubble("user", userText) + ChatBubble("assistant", "")
@@ -191,10 +222,10 @@ fun ChatScreen(
                 }
                 val candidates = ordered.map { Triple(it.info.id, it.info.name, it.info.websiteUrl) }
 
-                val reply: String = if (candidates.isEmpty()) {
+                var reply = if (candidates.isEmpty()) {
                     "No source installed. Open Store → install → Providers → Sign in."
                 } else {
-                    val buf = StringBuilder()
+                    var last = ""
                     ProviderBridge.streamChatWithFallback(
                         context = context,
                         candidates = candidates,
@@ -202,11 +233,13 @@ fun ChatScreen(
                         kind = "WEB"
                     ).collect { tok ->
                         if (tok.text.isNotEmpty()) {
-                            buf.append(tok.text)
-                            messages = baseline + ChatBubble("user", userText) + ChatBubble("assistant", buf.toString())
+                            // Cumulative full text from engine — REPLACE, do not append
+                            last = tok.text
+                            answering = true
+                            messages = baseline + ChatBubble("user", userText) + ChatBubble("assistant", last)
                         }
                     }
-                    buf.toString().ifBlank { "No reply." }
+                    last.ifBlank { "No reply." }
                 }
 
                 messages = baseline + ChatBubble("user", userText) + ChatBubble("assistant", reply)
@@ -224,6 +257,7 @@ fun ChatScreen(
                 }
             } finally {
                 sending = false
+                answering = false
                 uiLocked = false
             }
         }
@@ -328,12 +362,28 @@ fun ChatScreen(
                                 items(messages.size) { idx ->
                                     val msg = messages[idx]
                                     val mine = msg.role == "user"
+                                    val isLiveAssistant = !mine && idx == messages.lastIndex && sending
                                     Row(Modifier.fillMaxWidth(), horizontalArrangement = if (mine) Arrangement.End else Arrangement.Start) {
                                         Surface(shape = RoundedCornerShape(16.dp), color = if (mine) OmniAmber.copy(alpha = 0.25f) else MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.widthIn(max = 320.dp)) {
-                                            Text(msg.content.ifBlank { "…" }, Modifier.padding(12.dp))
+                                            Column(Modifier.padding(12.dp)) {
+                                                when {
+                                                    isLiveAssistant && msg.content.isBlank() && !answering -> {
+                                                        BounceDots()
+                                                    }
+                                                    isLiveAssistant && msg.content.isBlank() && answering -> {
+                                                        Text("…", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                                    }
+                                                    else -> {
+                                                        Text(msg.content, style = MaterialTheme.typography.bodyLarge)
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 }
+                            }
+                            LaunchedEffect(messages.size, messages.lastOrNull()?.content?.length) {
+                                if (messages.isNotEmpty()) listState.animateScrollToItem(messages.lastIndex)
                             }
                         }
                     }
@@ -342,68 +392,60 @@ fun ChatScreen(
         }
     }
 
-    menuConv?.let { conv ->
-        AlertDialog(
-            onDismissRequest = { menuConv = null },
-            title = { Text(conv.title, maxLines = 2, overflow = TextOverflow.Ellipsis) },
-            text = {
-                Column {
-                    TextButton(onClick = { renameText = conv.title; showRename = true }) { Text("Rename") }
-                    TextButton(onClick = { scope.launch { app.chatRepo.setPinned(conv.id, !conv.isPinned); menuConv = null } }) { Text(if (conv.isPinned) "Unpin" else "Pin") }
-                    TextButton(onClick = { showProjectPicker = true }) { Text("Add to project") }
-                    TextButton(onClick = { scope.launch { app.chatRepo.deleteConversation(conv.id); if (currentConvId == conv.id) startNewChat(); menuConv = null } }, colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)) { Text("Delete") }
-                }
-            },
-            confirmButton = { TextButton(onClick = { menuConv = null }) { Text("Close") } }
-        )
+    if (showAddSheet) {
+        ModalBottomSheet(onDismissRequest = { showAddSheet = false }) {
+            ListItem(headlineContent = { Text("Add image") }, leadingContent = { Icon(Icons.Default.Image, null) }, modifier = Modifier.clickable { showAddSheet = false; imagePicker.launch("image/*") })
+            ListItem(headlineContent = { Text("Add file") }, leadingContent = { Icon(Icons.Default.AttachFile, null) }, modifier = Modifier.clickable { showAddSheet = false; filePicker.launch(arrayOf("*/*")) })
+            Spacer(Modifier.height(24.dp))
+        }
     }
-
-    if (showRename && menuConv != null) {
+    if (showProviderSheet) {
+        ModalBottomSheet(onDismissRequest = { showProviderSheet = false }) {
+            ListItem(headlineContent = { Text("Auto") }, modifier = Modifier.clickable {
+                preferred = "auto"; ProviderAuthStore.setPreferredProvider(context, "auto"); showProviderSheet = false
+            })
+            sources.forEach { s ->
+                ListItem(headlineContent = { Text(s.info.name) }, modifier = Modifier.clickable {
+                    preferred = s.info.id; ProviderAuthStore.setPreferredProvider(context, s.info.id); showProviderSheet = false
+                })
+            }
+            Spacer(Modifier.height(24.dp))
+        }
+    }
+    menuConv?.let { conv ->
+        ModalBottomSheet(onDismissRequest = { menuConv = null }) {
+            ListItem(headlineContent = { Text("Rename") }, modifier = Modifier.clickable { showRename = true; menuConv = null })
+            ListItem(headlineContent = { Text(if (conv.isPinned) "Unpin" else "Pin") }, modifier = Modifier.clickable {
+                scope.launch { withContext(Dispatchers.IO) { app.chatRepo.setPinned(conv.id, !conv.isPinned) }; menuConv = null }
+            })
+            ListItem(headlineContent = { Text("Add to project") }, modifier = Modifier.clickable { showProjectPicker = true })
+            ListItem(headlineContent = { Text("Delete") }, modifier = Modifier.clickable {
+                scope.launch {
+                    withContext(Dispatchers.IO) { app.chatRepo.deleteConversation(conv.id) }
+                    if (currentConvId == conv.id) startNewChat()
+                    menuConv = null
+                }
+            })
+            Spacer(Modifier.height(24.dp))
+        }
+    }
+    if (showRename) {
         AlertDialog(
             onDismissRequest = { showRename = false },
             title = { Text("Rename") },
             text = { OutlinedTextField(value = renameText, onValueChange = { renameText = it }, singleLine = true) },
-            confirmButton = { TextButton(onClick = { val id = menuConv!!.id; scope.launch { app.chatRepo.renameConversation(id, renameText.ifBlank { "Chat" }); showRename = false; menuConv = null } }) { Text("Save") } },
+            confirmButton = {
+                TextButton(onClick = {
+                    val id = conversations.find { it.title == renameText || true }?.id
+                    scope.launch {
+                        currentConvId?.let { cid ->
+                            withContext(Dispatchers.IO) { app.chatRepo.renameConversation(cid, renameText) }
+                        }
+                        showRename = false
+                    }
+                }) { Text("Save") }
+            },
             dismissButton = { TextButton(onClick = { showRename = false }) { Text("Cancel") } }
         )
-    }
-
-    if (showProjectPicker && menuConv != null) {
-        AlertDialog(
-            onDismissRequest = { showProjectPicker = false },
-            title = { Text("Add to project") },
-            text = {
-                Column {
-                    if (projects.isEmpty()) Text("No projects yet. Create one in Projects.")
-                    projects.forEach { p -> TextButton(onClick = { val cid = menuConv!!.id; scope.launch { app.chatRepo.setProject(cid, p.id); showProjectPicker = false; menuConv = null } }) { Text(p.name) } }
-                }
-            },
-            confirmButton = { TextButton(onClick = { showProjectPicker = false }) { Text("Close") } }
-        )
-    }
-
-    if (showAddSheet) {
-        ModalBottomSheet(onDismissRequest = { showAddSheet = false }) {
-            Column(Modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Add to chat", fontWeight = FontWeight.Bold)
-                Button(onClick = { showAddSheet = false; imagePicker.launch("image/*") }, modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = OmniAmber, contentColor = Color.Black)) { Text("Add image") }
-                OutlinedButton(onClick = { showAddSheet = false; filePicker.launch(arrayOf("*/*")) }, modifier = Modifier.fillMaxWidth()) { Text("Add file") }
-                Spacer(Modifier.height(16.dp))
-            }
-        }
-    }
-
-    if (showProviderSheet) {
-        ModalBottomSheet(onDismissRequest = { showProviderSheet = false }) {
-            Column(Modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text("Provider", fontWeight = FontWeight.Bold)
-                if (sources.isEmpty()) Text("Install a source from Store first.", style = MaterialTheme.typography.bodySmall)
-                Spacer(Modifier.height(8.dp))
-                (listOf("auto" to "Auto") + sources.map { it.info.id to it.info.name }).forEach { (id, label) ->
-                    NavigationDrawerItem(label = { Text(label) }, selected = preferred == id, onClick = { preferred = id; ProviderAuthStore.setPreferredProvider(context, id); showProviderSheet = false })
-                }
-                Spacer(Modifier.height(16.dp))
-            }
-        }
     }
 }
