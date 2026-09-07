@@ -67,7 +67,7 @@ jobs:
         id: ver
         run: |
           VN=$(grep -E 'versionName\s*=' app/build.gradle.kts | head -1 | sed -E 's/.*versionName\s*=\s*"([^"]+)".*/\1/')
-          if [ -z "$VN" ]; then VN="1.0.9.7"; fi
+          if [ -z "$VN" ]; then VN="1.0.9.8"; fi
           echo "version=$VN" >> $GITHUB_OUTPUT
           echo "Resolved versionName=$VN"
 
@@ -122,13 +122,13 @@ jobs:
             App versionName: **${{ steps.ver.outputs.version }}**
             Channel: **${{ steps.meta.outputs.channel }}**
 
-            ### 1.0.9.7 WebRelay (universal)
-            - Conversation **fingerprint baseline** (structure-agnostic)
-            - SEND confirmed only on **user-turn evidence** or generating UI
-            - REPLY primary = **delta after baseline**; role/class selectors are boosts only
-            - Timeout salvage uses main/body tail + user-message split
-            - Same path for ChatGPT / Perplexity / S.ai / all providers
-            - No per-provider product fork; queue + fail-fast INPUT kept
+            ### 1.0.9.8 — accuracy + speed
+            - **Last-turn extract** after user message (no multi-turn dump)
+            - Strip chrome: Flash / Deep Think / "You said" / disclaimers / "can make mistakes"
+            - Suppress partial user-echo fragments (e.g. "ey")
+            - Faster quiet completion (~180ms after growth)
+            - **Hard stop 60s** (was ~90s)
+            - Still universal — not one-site-only selectors
 
             Install the APK attached to this release.
           files: ${{ steps.meta.outputs.apk }}
