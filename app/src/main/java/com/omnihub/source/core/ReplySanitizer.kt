@@ -1,8 +1,7 @@
 package com.omnihub.source.core
 
 /**
- * Strip thinking blocks + provider chrome/disclaimers so the bubble is the answer only.
- * Universal — not tied to one site’s DOM.
+ * Strip thinking + provider chrome so the bubble is the answer only.
  */
 object ReplySanitizer {
 
@@ -22,7 +21,6 @@ object ReplySanitizer {
         "(?is)^\\s*(?:thought process|thinking|reasoning)\\s*[:\\-]\\s*"
     )
 
-    /** Single-line chrome: model badges, nav, disclaimers */
     private val CHROME_LINE = Regex(
         """(?ix)^
         (
@@ -33,7 +31,11 @@ object ReplySanitizer {
           conversation\s+with\s+\w+|gemini\s+flash|chatgpt|claude|perplexity|
           you\s+said\b.*|\w+\s+said\b.*|
           .*can\s+make\s+mistakes.*|.*check\s+important\s+info.*|
-          generated\s+by\s+ai\.?|for\s+reference\s+only\.?
+          generated\s+by\s+ai\.?|for\s+reference\s+only\.?|
+          ask\s+a\s+follow[- ]?up|ai\s+ppt|meet\s+your\s+ai\s+agents|
+          zcode|autoclaw|code\s+faster\s+with.*|automate\s+more\s+with.*|
+          glm[-\d.a-z]*|benjamin\s+chume|
+          \d{1,2}:\d{2}\s*(?:AM|PM)?
         )
         $"""
     )
@@ -43,7 +45,11 @@ object ReplySanitizer {
     )
 
     private val YOU_SAID_BLOCK = Regex(
-        "(?im)^(?:You said|Gemini said|ChatGPT said|Claude said|Assistant said)\\s*:?\\s*.*$"
+        "(?im)^(?:You said|Gemini said|ChatGPT said|Claude said|Assistant said|Ask a follow-up)\\s*:?\\s*.*$"
+    )
+
+    private val PRODUCT_BLOB = Regex(
+        "(?is)(?:AI PPT|Meet Your AI Agents|Code faster with ZCode[^.]*\\.?|Automate more with AutoClaw[^.]*\\.?|ZCode|AutoClaw|GLM-5[\\d.]*-?Flash?)"
     )
 
     fun strip(raw: String): String {
@@ -53,22 +59,20 @@ object ReplySanitizer {
         t = FENCE.replace(t, "")
         t = HEADER_BLOCK.replace(t, "")
         t = DISCLAIMER.replace(t, "")
+        t = PRODUCT_BLOB.replace(t, "")
         t = t.lines()
             .map { it.trim() }
             .filter { it.isNotEmpty() }
             .filterNot { HEADER_LINE.matches(it) }
             .filterNot { CHROME_LINE.matches(it) }
             .filterNot { YOU_SAID_BLOCK.matches(it) }
-            .filterNot { it.length <= 2 && it.all { c -> c.isLetter() } } // stray "ey"
+            .filterNot { it.length <= 2 && it.all { c -> c.isLetter() } }
             .joinToString("\n")
         t = INLINE_LEAD.replace(t, "")
         t = t.replace(Regex("\n{3,}"), "\n\n").trim()
         return t
     }
 
-    /**
-     * Keep only the last assistant turn after the user's message, drop prior turns/chrome.
-     */
     fun lastTurnOnly(raw: String, userMessage: String): String {
         var t = strip(raw)
         val um = userMessage.trim()
@@ -76,16 +80,16 @@ object ReplySanitizer {
             val idx = t.lastIndexOf(um)
             if (idx >= 0) {
                 t = t.substring(idx + um.length).trim()
-                // drop a second echo of the user line if present
                 if (t.startsWith(um)) t = t.removePrefix(um).trim()
             }
         }
-        // If multiple greeting-like paragraphs, prefer the last substantial one
-        val paras = t.split(Regex("\n{2,}")).map { it.trim() }.filter { it.length > 8 }
-        if (paras.size > 1) {
-            // Prefer last that doesn't look like chrome leftover
-            t = paras.lastOrNull { !CHROME_LINE.matches(it.lineSequence().firstOrNull().orEmpty()) }
-                ?: paras.last()
+        // For long answers keep full body after strip; only collapse multi-para chrome intros
+        if (t.length < 400) {
+            val paras = t.split(Regex("\n{2,}")).map { it.trim() }.filter { it.length > 8 }
+            if (paras.size > 1) {
+                t = paras.lastOrNull { !CHROME_LINE.matches(it.lineSequence().firstOrNull().orEmpty()) }
+                    ?: paras.last()
+            }
         }
         return strip(t)
     }
